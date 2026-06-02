@@ -5,10 +5,12 @@
 
 #include "wal/layer_shell.hpp"
 #include "wal/ui.hpp"
+#include "wal/config.hpp"
 
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -79,13 +81,16 @@ private:
     VkCommandPool commandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commandBuffers;
 
-    VkBuffer vertexBuffer = VK_NULL_HANDLE;
-    VkDeviceMemory vertexBufferMemory = VK_NULL_HANDLE;
+    std::array<VkBuffer, maxFramesInFlight> vertexBuffers{};
+    std::array<VkDeviceMemory, maxFramesInFlight> vertexBufferMemories{};
+    std::array<VkDeviceSize, maxFramesInFlight> vertexBufferCapacities{};
     std::vector<ui::Vertex> uiVertices;
+    bool uiDirty = true;
 
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
     std::vector<VkFence> inFlightFences;
+    std::vector<VkFence> imagesInFlight;
     uint32_t currentFrame = 0;
 
     static void registryGlobal(void* data, wl_registry* registry, uint32_t name, const char* interface, uint32_t version);
@@ -158,11 +163,13 @@ private:
     void createUiVertexBuffer();
     void createCommandBuffers();
     void createSyncObjects();
-    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex);
+    void recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, size_t frameIndex);
     void drawFrame();
     void recreateSwapchain();
     void cleanupSwapchain();
     void destroyUiVertexBuffer();
+    void destroyUiVertexBuffer(size_t frameIndex);
+    void uploadUiVertexBuffer(size_t frameIndex);
     void rebuildUi();
     void refreshUi();
     void insertText(std::string_view value);

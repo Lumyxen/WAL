@@ -298,7 +298,10 @@ void App::pointerMotion(void* data, wl_pointer*, uint32_t, wl_fixed_t surfaceX, 
     app->pointerX = static_cast<float>(wl_fixed_to_double(surfaceX));
     app->pointerY = static_cast<float>(wl_fixed_to_double(surfaceY));
     if (app->mouseSelectingText) {
-        app->moveCursor(app->textIndexAtPointer(app->pointerX), true);
+        const size_t nextIndex = app->textIndexAtPointer(app->pointerX);
+        if (nextIndex != app->textCursorIndex) {
+            app->moveCursor(nextIndex, true);
+        }
     }
 }
 
@@ -691,6 +694,7 @@ void App::createSwapchain()
 
     swapchainImageFormat = surfaceFormat.format;
     swapchainExtent = extent;
+    imagesInFlight.assign(swapchainImages.size(), VK_NULL_HANDLE);
 }
 
 void App::createImageViews()
@@ -918,23 +922,14 @@ void App::createCommandPool()
 void App::createUiVertexBuffer()
 {
     rebuildUi();
+    uiDirty = false;
     if (uiVertices.empty()) {
         return;
     }
 
-    const VkDeviceSize bufferSize = sizeof(ui::Vertex) * uiVertices.size();
-    createBuffer(
-        bufferSize,
-        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-        vertexBuffer,
-        vertexBufferMemory
-    );
-
-    void* data = nullptr;
-    vkMapMemory(device, vertexBufferMemory, 0, bufferSize, 0, &data);
-    std::memcpy(data, uiVertices.data(), static_cast<size_t>(bufferSize));
-    vkUnmapMemory(device, vertexBufferMemory);
+    for (size_t i = 0; i < vertexBuffers.size(); ++i) {
+        uploadUiVertexBuffer(i);
+    }
 }
 
 void App::createCommandBuffers()
@@ -949,10 +944,6 @@ void App::createCommandBuffers()
 
     if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
         throw std::runtime_error("failed to allocate command buffers");
-    }
-
-    for (size_t i = 0; i < commandBuffers.size(); ++i) {
-        recordCommandBuffer(commandBuffers[i], static_cast<uint32_t>(i));
     }
 }
 
@@ -978,7 +969,7 @@ void App::createSyncObjects()
     }
 }
 
-void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex)
+void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, size_t frameIndex)
 {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1000,10 +991,10 @@ void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex
 
     vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphicsPipeline);
-    if (vertexBuffer != VK_NULL_HANDLE && !uiVertices.empty()) {
-        VkBuffer vertexBuffers[] = {vertexBuffer};
+    if (vertexBuffers[frameIndex] != VK_NULL_HANDLE && !uiVertices.empty()) {
+        VkBuffer frameVertexBuffers[] = {vertexBuffers[frameIndex]};
         VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, frameVertexBuffers, offsets);
         vkCmdDraw(commandBuffer, static_cast<uint32_t>(uiVertices.size()), 1, 0, 0);
     }
     vkCmdEndRenderPass(commandBuffer);
@@ -1020,6 +1011,12 @@ void App::drawFrame()
     }
 
     vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+
+    if (uiDirty) {
+        rebuildUi();
+        uiDirty = false;
+    }
+    uploadUiVertexBuffer(currentFrame);
 
     uint32_t imageIndex = 0;
     VkResult result = vkAcquireNextImageKHR(
@@ -1039,7 +1036,14 @@ void App::drawFrame()
         throw std::runtime_error("failed to acquire swapchain image");
     }
 
+    if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
+        vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+    }
+    imagesInFlight[imageIndex] = inFlightFences[currentFrame];
+
     vkResetFences(device, 1, &inFlightFences[currentFrame]);
+    vkResetCommandBuffer(commandBuffers[imageIndex], 0);
+    recordCommandBuffer(commandBuffers[imageIndex], imageIndex, currentFrame);
 
     VkSemaphore waitSemaphores[] = {imageAvailableSemaphores[currentFrame]};
     VkPipelineStageFlags waitStages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -1128,34 +1132,57 @@ void App::cleanupSwapchain()
 
     vkDestroySwapchainKHR(device, swapchain, nullptr);
     swapchain = VK_NULL_HANDLE;
+    imagesInFlight.clear();
 }
 
 void App::destroyUiVertexBuffer()
 {
-    if (vertexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device, vertexBuffer, nullptr);
-        vertexBuffer = VK_NULL_HANDLE;
+    for (size_t i = 0; i < vertexBuffers.size(); ++i) {
+        destroyUiVertexBuffer(i);
     }
-    if (vertexBufferMemory != VK_NULL_HANDLE) {
-        vkFreeMemory(device, vertexBufferMemory, nullptr);
-        vertexBufferMemory = VK_NULL_HANDLE;
+}
+
+void App::destroyUiVertexBuffer(size_t frameIndex)
+{
+    if (vertexBuffers[frameIndex] != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, vertexBuffers[frameIndex], nullptr);
+        vertexBuffers[frameIndex] = VK_NULL_HANDLE;
     }
+    if (vertexBufferMemories[frameIndex] != VK_NULL_HANDLE) {
+        vkFreeMemory(device, vertexBufferMemories[frameIndex], nullptr);
+        vertexBufferMemories[frameIndex] = VK_NULL_HANDLE;
+    }
+    vertexBufferCapacities[frameIndex] = 0;
+}
+
+void App::uploadUiVertexBuffer(size_t frameIndex)
+{
+    if (uiVertices.empty()) {
+        return;
+    }
+
+    const VkDeviceSize bufferSize = sizeof(ui::Vertex) * uiVertices.size();
+    if (vertexBufferCapacities[frameIndex] < bufferSize) {
+        destroyUiVertexBuffer(frameIndex);
+        createBuffer(
+            bufferSize,
+            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            vertexBuffers[frameIndex],
+            vertexBufferMemories[frameIndex]
+        );
+        vertexBufferCapacities[frameIndex] = bufferSize;
+    }
+
+    void* data = nullptr;
+    vkMapMemory(device, vertexBufferMemories[frameIndex], 0, bufferSize, 0, &data);
+    std::memcpy(data, uiVertices.data(), static_cast<size_t>(bufferSize));
+    vkUnmapMemory(device, vertexBufferMemories[frameIndex]);
 }
 
 void App::refreshUi()
 {
-    if (device == VK_NULL_HANDLE || commandBuffers.empty()) {
-        return;
-    }
-
-    vkDeviceWaitIdle(device);
-    destroyUiVertexBuffer();
-    createUiVertexBuffer();
-
-    for (size_t i = 0; i < commandBuffers.size(); ++i) {
-        vkResetCommandBuffer(commandBuffers[i], 0);
-        recordCommandBuffer(commandBuffers[i], static_cast<uint32_t>(i));
-    }
+    uiDirty = true;
 }
 
 bool App::hasTextSelection() const
@@ -1232,11 +1259,16 @@ void App::deleteForward()
 
 void App::moveCursor(size_t nextIndex, bool extendSelection)
 {
+    const size_t previousCursor = textCursorIndex;
+    const size_t previousAnchor = textSelectionAnchor;
+
     textCursorIndex = std::min(nextIndex, textFieldValue.size());
     if (!extendSelection) {
         textSelectionAnchor = textCursorIndex;
     }
-    refreshUi();
+    if (textCursorIndex != previousCursor || textSelectionAnchor != previousAnchor) {
+        refreshUi();
+    }
 }
 
 void App::moveCursorByWord(bool forward, bool extendSelection)
