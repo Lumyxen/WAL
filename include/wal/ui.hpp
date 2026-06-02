@@ -83,6 +83,7 @@ struct TextFieldStyle {
 
 [[nodiscard]] float textWidth(std::string_view value, TextStyle style = {}, size_t endIndex = std::string_view::npos);
 [[nodiscard]] size_t textIndexAtOffset(std::string_view value, float offset, TextStyle style = {});
+[[nodiscard]] float textFieldScrollOffset(std::string_view value, TextStyle style, size_t cursorIndex, float visibleWidth);
 
 class Canvas {
 public:
@@ -113,6 +114,7 @@ private:
     [[nodiscard]] Vec2 toClipSpace(Vec2 point) const;
     void fillRect(Rect rect, Color color);
     void strokeRect(Rect rect, float thickness, Color color);
+    void clippedText(Rect bounds, float startX, std::string_view value, TextStyle style);
 };
 
 } // namespace wal::ui

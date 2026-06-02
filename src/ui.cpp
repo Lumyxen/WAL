@@ -173,6 +173,12 @@ size_t textIndexAtOffset(std::string_view value, float offset, TextStyle style)
     return value.size();
 }
 
+float textFieldScrollOffset(std::string_view value, TextStyle style, size_t cursorIndex, float visibleWidth)
+{
+    const float cursorX = textWidth(value, style, std::min(cursorIndex, value.size()));
+    return std::max(cursorX - std::max(visibleWidth - 3.0f, 0.0f), 0.0f);
+}
+
 Canvas::Canvas(float width, float height)
     : width_(std::max(width, 1.0f)),
       height_(std::max(height, 1.0f))
@@ -208,6 +214,11 @@ void Canvas::line(Vec2 from, Vec2 to, float thickness, Color color)
 
 void Canvas::text(Rect bounds, std::string_view value, TextStyle style)
 {
+    clippedText(bounds, bounds.x, value, style);
+}
+
+void Canvas::clippedText(Rect bounds, float startX, std::string_view value, TextStyle style)
+{
     if (value.empty()) {
         return;
     }
@@ -218,7 +229,8 @@ void Canvas::text(Rect bounds, std::string_view value, TextStyle style)
     }
 
     const float baseline = textVerticalMetrics(bounds, style).baseline;
-    float x = bounds.x;
+    float x = startX;
+    const float minX = bounds.x;
     const float maxX = bounds.x + bounds.width;
 
     for (const unsigned char character : value) {
@@ -228,8 +240,12 @@ void Canvas::text(Rect bounds, std::string_view value, TextStyle style)
 
         const auto* glyph = font.face->glyph;
         const float advance = static_cast<float>(glyph->advance.x >> 6);
-        if (x + advance > maxX) {
+        if (x >= maxX) {
             break;
+        }
+        if (x + advance <= minX) {
+            x += advance;
+            continue;
         }
 
         const FT_Bitmap& bitmap = glyph->bitmap;
@@ -250,13 +266,21 @@ void Canvas::text(Rect bounds, std::string_view value, TextStyle style)
                     ++spanWidth;
                 }
 
+                const float spanX = glyphX + static_cast<float>(column);
+                const float clippedSpanX = std::max(spanX, minX);
+                const float clippedSpanRight = std::min(spanX + static_cast<float>(spanWidth), maxX);
+                if (clippedSpanRight <= clippedSpanX) {
+                    column += spanWidth;
+                    continue;
+                }
+
                 Color glyphColor = style.color;
                 glyphColor.a *= static_cast<float>(alpha) / 255.0f;
                 fillRect(
                     {
-                        glyphX + static_cast<float>(column),
+                        clippedSpanX,
                         glyphY + static_cast<float>(row),
-                        static_cast<float>(spanWidth),
+                        clippedSpanRight - clippedSpanX,
                         1.0f,
                     },
                     glyphColor
@@ -295,26 +319,28 @@ void Canvas::textField(
     const float cursorHeight = std::min(rect.height - 6.0f, style.text.size);
     const float cursorY = rect.y + (rect.height - cursorHeight) * 0.5f;
     const bool hasSelection = cursorIndex != selectionAnchor;
+    const float scrollOffset = textFieldScrollOffset(value, style.text, cursorIndex, textBounds.width);
 
     if (hasSelection) {
         const size_t selectionStart = std::min(cursorIndex, selectionAnchor);
         const size_t selectionEnd = std::max(cursorIndex, selectionAnchor);
-        const float selectionX = textBounds.x + textWidth(value, style.text, selectionStart);
-        const float selectionWidth = textWidth(value, style.text, selectionEnd) - textWidth(value, style.text, selectionStart);
-        fillRect({selectionX, selectionY, selectionWidth, selectionHeight}, style.selection);
+        const float selectionX = textBounds.x - scrollOffset + textWidth(value, style.text, selectionStart);
+        const float selectionRight = textBounds.x - scrollOffset + textWidth(value, style.text, selectionEnd);
+        const float clippedSelectionX = std::max(selectionX, textBounds.x);
+        const float clippedSelectionRight = std::min(selectionRight, textBounds.x + textBounds.width);
+        if (clippedSelectionRight > clippedSelectionX) {
+            fillRect({clippedSelectionX, selectionY, clippedSelectionRight - clippedSelectionX, selectionHeight}, style.selection);
+        }
     }
 
     if (value.empty()) {
         text(textBounds, placeholder, style.placeholder);
     } else {
-        text(textBounds, value, style.text);
+        clippedText(textBounds, textBounds.x - scrollOffset, value, style.text);
     }
 
     if (focused && !hasSelection) {
-        const float cursorX = std::min(
-            rect.x + rect.width - horizontalTextInset - 1.0f,
-            textBounds.x + textWidth(value, style.text, cursorIndex) + 2.0f
-        );
+        const float cursorX = textBounds.x - scrollOffset + textWidth(value, style.text, cursorIndex) + 2.0f;
         line({cursorX, cursorY}, {cursorX, cursorY + cursorHeight}, 2.0f, style.cursor);
     }
 }

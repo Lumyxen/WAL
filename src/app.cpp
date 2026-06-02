@@ -1373,9 +1373,16 @@ ui::Rect App::textFieldRect() const
 size_t App::textIndexAtPointer(float x) const
 {
     const ui::Rect field = textFieldRect();
+    const float visibleTextWidth = field.width - textFieldHorizontalTextInset * 2.0f;
+    const float scrollOffset = ui::textFieldScrollOffset(
+        textFieldValue,
+        textFieldText,
+        textCursorIndex,
+        visibleTextWidth
+    );
     return ui::textIndexAtOffset(
         textFieldValue,
-        std::max(x - field.x - textFieldHorizontalTextInset, 0.0f),
+        std::max(x - field.x - textFieldHorizontalTextInset + scrollOffset, 0.0f),
         textFieldText
     );
 }
