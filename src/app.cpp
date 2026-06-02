@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cctype>
 #include <cstddef>
 #include <cstdio>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
+#include <sys/timerfd.h>
 #include <unistd.h>
 
 #include <linux/input-event-codes.h>
@@ -44,6 +46,17 @@ const ui::TextStyle textFieldText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .s
 constexpr float panelPadding = 18.0f;
 constexpr float textFieldHeight = 37.0f;
 constexpr float textFieldHorizontalTextInset = 8.0f;
+
+timespec toTimespec(std::chrono::nanoseconds duration)
+{
+    duration = std::max(duration, std::chrono::nanoseconds{1});
+    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
+    const auto nanoseconds = duration - seconds;
+    return {
+        static_cast<time_t>(seconds.count()),
+        static_cast<long>(nanoseconds.count()),
+    };
+}
 
 } // namespace
 
@@ -164,107 +177,30 @@ void App::keyboardKeymap(void* data, wl_keyboard*, uint32_t format, int32_t fd, 
 }
 
 void App::keyboardEnter(void*, wl_keyboard*, uint32_t, wl_surface*, wl_array*) {}
-void App::keyboardLeave(void*, wl_keyboard*, uint32_t, wl_surface*) {}
+void App::keyboardLeave(void* data, wl_keyboard*, uint32_t, wl_surface*)
+{
+    static_cast<App*>(data)->stopKeyRepeat();
+}
 
 void App::keyboardKey(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t key, uint32_t state)
 {
     auto* app = static_cast<App*>(data);
+
+    if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
+        app->handleKeyboardRepeat();
+        app->stopKeyRepeat(key);
+        return;
+    }
+
     if (state != WL_KEYBOARD_KEY_STATE_PRESSED) {
         return;
     }
 
-    if (app->xkbState == nullptr) {
-        return;
-    }
-
-    const xkb_keycode_t keycode = key + 8;
-    const xkb_keysym_t keysym = xkb_state_key_get_one_sym(app->xkbState, keycode);
-    const bool ctrl = xkb_state_mod_name_is_active(app->xkbState, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) != 0;
-    const bool shift = xkb_state_mod_name_is_active(app->xkbState, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) != 0;
-
-    if (keysym == XKB_KEY_Escape) {
-        app->running = false;
-        return;
-    }
-
-    if (ctrl) {
-        switch (keysym) {
-        case XKB_KEY_a:
-        case XKB_KEY_A:
-            app->selectAllText();
-            return;
-        case XKB_KEY_c:
-        case XKB_KEY_C:
-            app->copySelectionToClipboard();
-            return;
-        case XKB_KEY_x:
-        case XKB_KEY_X:
-            app->cutSelectionToClipboard();
-            return;
-        case XKB_KEY_v:
-        case XKB_KEY_V:
-            app->pasteFromClipboard();
-            return;
-        case XKB_KEY_Left:
-            app->moveCursorByWord(false, shift);
-            return;
-        case XKB_KEY_Right:
-            app->moveCursorByWord(true, shift);
-            return;
-        case XKB_KEY_BackSpace:
-            if (app->hasTextSelection()) {
-                app->deleteSelection();
-            } else {
-                app->moveCursorByWord(false, true);
-                app->deleteSelection();
-            }
-            app->refreshUi();
-            return;
-        case XKB_KEY_Delete:
-            if (app->hasTextSelection()) {
-                app->deleteSelection();
-            } else {
-                app->moveCursorByWord(true, true);
-                app->deleteSelection();
-            }
-            app->refreshUi();
-            return;
-        default:
-            return;
-        }
-    }
-
-    switch (keysym) {
-    case XKB_KEY_Left:
-        app->moveCursor(app->textCursorIndex == 0 ? 0 : app->textCursorIndex - 1, shift);
-        return;
-    case XKB_KEY_Right:
-        app->moveCursor(std::min(app->textCursorIndex + 1, app->textFieldValue.size()), shift);
-        return;
-    case XKB_KEY_Home:
-        app->moveCursor(0, shift);
-        return;
-    case XKB_KEY_End:
-        app->moveCursor(app->textFieldValue.size(), shift);
-        return;
-    case XKB_KEY_BackSpace:
-        app->deleteBackward();
-        return;
-    case XKB_KEY_Delete:
-        app->deleteForward();
-        return;
-    default:
-        break;
-    }
-
-    if (shift && keysym != XKB_KEY_space && keysym < 0x20) {
-        return;
-    }
-
-    std::array<char, 8> text{};
-    const int length = xkb_state_key_get_utf8(app->xkbState, keycode, text.data(), text.size());
-    if (length == 1 && text[0] >= 0x20 && text[0] <= 0x7e) {
-        app->insertText(std::string_view{text.data(), static_cast<size_t>(length)});
+    const bool handled = app->handleKey(key, true);
+    if (handled) {
+        app->beginKeyRepeat(key);
+    } else {
+        app->stopKeyRepeat();
     }
 }
 
@@ -283,7 +219,14 @@ void App::keyboardModifiers(
         xkb_state_update_mask(app->xkbState, modsDepressed, modsLatched, modsLocked, 0, 0, group);
     }
 }
-void App::keyboardRepeatInfo(void*, wl_keyboard*, int32_t, int32_t) {}
+void App::keyboardRepeatInfo(void* data, wl_keyboard*, int32_t rate, int32_t delay)
+{
+    auto* app = static_cast<App*>(data);
+    if (rate > 0) {
+        app->keyboardRepeatRate = rate;
+        app->keyboardRepeatDelay = std::chrono::milliseconds{std::max(delay, 0)};
+    }
+}
 
 void App::pointerEnter(void* data, wl_pointer*, uint32_t, wl_surface*, wl_fixed_t surfaceX, wl_fixed_t surfaceY)
 {
@@ -354,6 +297,7 @@ void App::seatCapabilities(void* data, wl_seat* seat, uint32_t capabilities)
         };
         wl_keyboard_add_listener(app->keyboard, &keyboardListener, app);
     } else if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) == 0 && app->keyboard != nullptr) {
+        app->stopKeyRepeat();
         wl_keyboard_release(app->keyboard);
         app->keyboard = nullptr;
     }
@@ -495,9 +439,13 @@ void App::initVulkan()
 
 void App::mainLoop()
 {
+    bool needsFrame = true;
     while (running) {
+        if (needsFrame || uiDirty) {
+            drawFrame();
+            needsFrame = false;
+        }
         dispatchWaylandEvents();
-        drawFrame();
     }
 
     vkDeviceWaitIdle(device);
@@ -518,6 +466,9 @@ void App::cleanup()
     vkDestroySurfaceKHR(instance, surface, nullptr);
     vkDestroyInstance(instance, nullptr);
 
+    if (keyboardRepeatTimerFd != -1) {
+        close(keyboardRepeatTimerFd);
+    }
     if (pointer != nullptr) {
         wl_pointer_release(pointer);
     }
@@ -1015,8 +966,15 @@ void App::drawFrame()
         return;
     }
 
-    vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+    const VkResult fenceResult = vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, 0);
+    if (fenceResult == VK_TIMEOUT) {
+        return;
+    }
+    if (fenceResult != VK_SUCCESS) {
+        throw std::runtime_error("failed to wait for frame fence");
+    }
 
+    const bool wasUiDirty = uiDirty;
     if (uiDirty) {
         rebuildUi();
         uiDirty = false;
@@ -1027,12 +985,16 @@ void App::drawFrame()
     VkResult result = vkAcquireNextImageKHR(
         device,
         swapchain,
-        UINT64_MAX,
+        0,
         imageAvailableSemaphores[currentFrame],
         VK_NULL_HANDLE,
         &imageIndex
     );
 
+    if (result == VK_NOT_READY || result == VK_TIMEOUT) {
+        uiDirty = uiDirty || wasUiDirty;
+        return;
+    }
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         recreateSwapchain();
         return;
@@ -1042,7 +1004,14 @@ void App::drawFrame()
     }
 
     if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
-        vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, UINT64_MAX);
+        const VkResult imageFenceResult = vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, 0);
+        if (imageFenceResult == VK_TIMEOUT) {
+            uiDirty = uiDirty || wasUiDirty;
+            return;
+        }
+        if (imageFenceResult != VK_SUCCESS) {
+            throw std::runtime_error("failed to wait for swapchain image fence");
+        }
     }
     imagesInFlight[imageIndex] = inFlightFences[currentFrame];
 
@@ -1064,7 +1033,8 @@ void App::drawFrame()
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = signalSemaphores;
 
-    if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
+    const VkResult submitResult = vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]);
+    if (submitResult != VK_SUCCESS) {
         throw std::runtime_error("failed to submit draw command buffer");
     }
 
@@ -1260,6 +1230,178 @@ void App::deleteForward()
         textSelectionAnchor = textCursorIndex;
     }
     refreshUi();
+}
+
+bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
+{
+    if (xkbState == nullptr) {
+        return false;
+    }
+
+    const xkb_keycode_t keycode = key + 8;
+    const xkb_keysym_t keysym = xkb_state_key_get_one_sym(xkbState, keycode);
+    const bool ctrl = xkb_state_mod_name_is_active(xkbState, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) != 0;
+    const bool shift = xkb_state_mod_name_is_active(xkbState, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) != 0;
+
+    if (allowSingleShotShortcuts && keysym == XKB_KEY_Escape) {
+        running = false;
+        return false;
+    }
+
+    if (ctrl) {
+        switch (keysym) {
+        case XKB_KEY_a:
+        case XKB_KEY_A:
+            if (allowSingleShotShortcuts) {
+                selectAllText();
+            }
+            return false;
+        case XKB_KEY_c:
+        case XKB_KEY_C:
+            if (allowSingleShotShortcuts) {
+                copySelectionToClipboard();
+            }
+            return false;
+        case XKB_KEY_x:
+        case XKB_KEY_X:
+            if (allowSingleShotShortcuts) {
+                cutSelectionToClipboard();
+            }
+            return false;
+        case XKB_KEY_v:
+        case XKB_KEY_V:
+            if (allowSingleShotShortcuts) {
+                pasteFromClipboard();
+            }
+            return false;
+        case XKB_KEY_Left:
+            moveCursorByWord(false, shift);
+            return true;
+        case XKB_KEY_Right:
+            moveCursorByWord(true, shift);
+            return true;
+        case XKB_KEY_BackSpace:
+            if (hasTextSelection()) {
+                deleteSelection();
+            } else {
+                moveCursorByWord(false, true);
+                deleteSelection();
+            }
+            refreshUi();
+            return true;
+        case XKB_KEY_Delete:
+            if (hasTextSelection()) {
+                deleteSelection();
+            } else {
+                moveCursorByWord(true, true);
+                deleteSelection();
+            }
+            refreshUi();
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    switch (keysym) {
+    case XKB_KEY_Left:
+        moveCursor(textCursorIndex == 0 ? 0 : textCursorIndex - 1, shift);
+        return true;
+    case XKB_KEY_Right:
+        moveCursor(std::min(textCursorIndex + 1, textFieldValue.size()), shift);
+        return true;
+    case XKB_KEY_Home:
+        moveCursor(0, shift);
+        return true;
+    case XKB_KEY_End:
+        moveCursor(textFieldValue.size(), shift);
+        return true;
+    case XKB_KEY_BackSpace:
+        deleteBackward();
+        return true;
+    case XKB_KEY_Delete:
+        deleteForward();
+        return true;
+    default:
+        break;
+    }
+
+    if (shift && keysym != XKB_KEY_space && keysym < 0x20) {
+        return false;
+    }
+
+    std::array<char, 8> text{};
+    const int length = xkb_state_key_get_utf8(xkbState, keycode, text.data(), text.size());
+    if (length == 1 && text[0] >= 0x20 && text[0] <= 0x7e) {
+        insertText(std::string_view{text.data(), static_cast<size_t>(length)});
+        return true;
+    }
+
+    return false;
+}
+
+void App::beginKeyRepeat(uint32_t key)
+{
+    if (keyboardRepeatRate <= 0) {
+        stopKeyRepeat();
+        return;
+    }
+
+    if (keyboardRepeatTimerFd == -1) {
+        keyboardRepeatTimerFd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+        if (keyboardRepeatTimerFd == -1) {
+            stopKeyRepeat();
+            return;
+        }
+    }
+
+    const auto interval = std::chrono::nanoseconds{std::max<int64_t>(
+        1,
+        1'000'000'000LL / static_cast<int64_t>(keyboardRepeatRate)
+    )};
+
+    itimerspec timer{};
+    timer.it_value = toTimespec(std::chrono::duration_cast<std::chrono::nanoseconds>(keyboardRepeatDelay));
+    timer.it_interval = toTimespec(interval);
+    if (timerfd_settime(keyboardRepeatTimerFd, 0, &timer, nullptr) == -1) {
+        stopKeyRepeat();
+        return;
+    }
+
+    repeatingKey = key;
+}
+
+void App::stopKeyRepeat(uint32_t key)
+{
+    if (repeatingKey == key) {
+        stopKeyRepeat();
+    }
+}
+
+void App::stopKeyRepeat()
+{
+    repeatingKey.reset();
+    if (keyboardRepeatTimerFd != -1) {
+        itimerspec timer{};
+        timerfd_settime(keyboardRepeatTimerFd, 0, &timer, nullptr);
+    }
+}
+
+void App::handleKeyboardRepeat()
+{
+    if (!repeatingKey.has_value() || keyboardRepeatTimerFd == -1) {
+        return;
+    }
+
+    uint64_t repeatCount = 0;
+    if (read(keyboardRepeatTimerFd, &repeatCount, sizeof(repeatCount)) != sizeof(repeatCount)) {
+        return;
+    }
+
+    repeatCount = std::min<uint64_t>(repeatCount, 32);
+    for (uint64_t i = 0; running && repeatingKey.has_value() && i < repeatCount; ++i) {
+        handleKey(*repeatingKey, false);
+    }
 }
 
 void App::moveCursor(size_t nextIndex, bool extendSelection)
@@ -1625,17 +1767,57 @@ void App::createBuffer(
 
 void App::dispatchWaylandEvents()
 {
-    wl_display_dispatch_pending(display);
+    handleKeyboardRepeat();
 
-    pollfd displayPoll{};
-    displayPoll.fd = wl_display_get_fd(display);
-    displayPoll.events = POLLIN;
+    if (wl_display_dispatch_pending(display) == -1) {
+        running = false;
+        return;
+    }
+    if (!running) {
+        return;
+    }
 
-    if (poll(&displayPoll, 1, 0) > 0 && (displayPoll.revents & POLLIN) != 0) {
-        if (wl_display_dispatch(display) == -1) {
+    while (wl_display_prepare_read(display) != 0) {
+        if (wl_display_dispatch_pending(display) == -1) {
             running = false;
             return;
         }
+    }
+
+    wl_display_flush(display);
+
+    std::array<pollfd, 2> polls{};
+    nfds_t pollCount = 1;
+    polls[0].fd = wl_display_get_fd(display);
+    polls[0].events = POLLIN;
+    if (keyboardRepeatTimerFd != -1) {
+        polls[1].fd = keyboardRepeatTimerFd;
+        polls[1].events = POLLIN;
+        pollCount = 2;
+    }
+
+    const int pollResult = poll(polls.data(), pollCount, uiDirty ? 0 : -1);
+    if (pollResult <= 0) {
+        wl_display_cancel_read(display);
+        return;
+    }
+
+    if (pollResult > 0 && pollCount > 1 && (polls[1].revents & POLLIN) != 0) {
+        handleKeyboardRepeat();
+    }
+
+    if ((polls[0].revents & POLLIN) != 0) {
+        if (wl_display_read_events(display) == -1) {
+            running = false;
+            return;
+        }
+    } else {
+        wl_display_cancel_read(display);
+    }
+
+    if (wl_display_dispatch_pending(display) == -1) {
+        running = false;
+        return;
     }
 
     wl_display_flush(display);

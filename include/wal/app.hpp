@@ -11,6 +11,7 @@
 #include <xkbcommon/xkbcommon.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -60,6 +61,10 @@ private:
     float pointerX = 0.0f;
     float pointerY = 0.0f;
     bool mouseSelectingText = false;
+    int32_t keyboardRepeatRate = 25;
+    std::chrono::milliseconds keyboardRepeatDelay{600};
+    int keyboardRepeatTimerFd = -1;
+    std::optional<uint32_t> repeatingKey;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -176,6 +181,11 @@ private:
     void deleteBackward();
     void deleteForward();
     void deleteSelection();
+    bool handleKey(uint32_t key, bool allowSingleShotShortcuts);
+    void beginKeyRepeat(uint32_t key);
+    void stopKeyRepeat(uint32_t key);
+    void stopKeyRepeat();
+    void handleKeyboardRepeat();
     void moveCursor(size_t nextIndex, bool extendSelection);
     void moveCursorByWord(bool forward, bool extendSelection);
     void selectAllText();
