@@ -37,8 +37,10 @@ constexpr std::array<float, 4> backgroundTint = {
 
 const ui::Color panelFill = ui::Color::srgb(0x2e, 0x38, 0x3c);
 const ui::Color panelBorder = ui::Color::srgb(0x7a, 0x84, 0x78);
-const ui::Color textFieldFill = ui::Color::srgb(0x41, 0x4b, 0x50);
+const ui::Color textFieldFill = ui::Color::srgb(0x28, 0x30, 0x34);
 const ui::TextStyle textFieldText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 16.0f};
+constexpr float panelPadding = 18.0f;
+constexpr float textFieldHeight = 37.0f;
 
 } // namespace
 
@@ -1358,17 +1360,17 @@ ui::Rect App::textFieldRect() const
     };
 
     return {
-        panel.x,
-        panel.y - 24.0f,
-        panel.width,
-        24.0f,
+        panel.x + panelPadding,
+        panel.y + panelPadding,
+        panel.width - panelPadding * 2.0f,
+        textFieldHeight,
     };
 }
 
 size_t App::textIndexAtPointer(float x) const
 {
     const ui::Rect field = textFieldRect();
-    return ui::textIndexAtOffset(textFieldValue, std::max(x - field.x - 14.0f, 0.0f), textFieldText);
+    return ui::textIndexAtOffset(textFieldValue, std::max(x - field.x - 8.0f, 0.0f), textFieldText);
 }
 
 void App::rebuildUi()
@@ -1394,7 +1396,7 @@ void App::rebuildUi()
         textFieldValue,
         true,
         {
-            .box = {.fill = textFieldFill, .border = panelBorder, .borderWidth = 1.0f},
+            .box = {.fill = textFieldFill, .borderWidth = 0.0f},
             .text = textFieldText,
         },
         textCursorIndex,

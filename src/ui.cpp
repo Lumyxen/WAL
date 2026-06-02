@@ -282,7 +282,13 @@ void Canvas::textField(
 
     cursorIndex = std::min(cursorIndex, value.size());
     selectionAnchor = std::min(selectionAnchor, value.size());
-    const Rect textBounds{rect.x + 14.0f, rect.y, rect.width - 28.0f, rect.height};
+    constexpr float horizontalTextInset = 8.0f;
+    const Rect textBounds{
+        rect.x + horizontalTextInset,
+        rect.y,
+        rect.width - horizontalTextInset * 2.0f,
+        rect.height,
+    };
     const float selectionHeight = std::min(rect.height - 4.0f, style.text.size + 2.0f);
     const float selectionY = rect.y + (rect.height - selectionHeight) * 0.5f;
     const float cursorHeight = std::min(rect.height - 6.0f, style.text.size);
@@ -300,7 +306,10 @@ void Canvas::textField(
     text(textBounds, value, style.text);
 
     if (focused && !hasSelection) {
-        const float cursorX = std::min(rect.x + rect.width - 15.0f, textBounds.x + textWidth(value, style.text, cursorIndex) + 2.0f);
+        const float cursorX = std::min(
+            rect.x + rect.width - horizontalTextInset - 1.0f,
+            textBounds.x + textWidth(value, style.text, cursorIndex) + 2.0f
+        );
         line({cursorX, cursorY}, {cursorX, cursorY + cursorHeight}, 2.0f, style.cursor);
     }
 }
