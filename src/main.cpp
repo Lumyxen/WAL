@@ -242,7 +242,6 @@ private:
     wl_display* display = nullptr;
     wl_registry* registry = nullptr;
     wl_compositor* compositor = nullptr;
-    wl_output* output = nullptr;
     wl_seat* seat = nullptr;
     wl_surface* waylandSurface = nullptr;
     zwlr_layer_shell_v1* layerShell = nullptr;
@@ -293,13 +292,6 @@ private:
                 registry,
                 name,
                 &wl_compositor_interface,
-                std::min(version, 4u)
-            ));
-        } else if (std::strcmp(interface, wl_output_interface.name) == 0 && app->output == nullptr) {
-            app->output = static_cast<wl_output*>(wl_registry_bind(
-                registry,
-                name,
-                &wl_output_interface,
                 std::min(version, 4u)
             ));
         } else if (std::strcmp(interface, wl_seat_interface.name) == 0) {
@@ -378,7 +370,7 @@ private:
         layerSurface = zwlr_layer_shell_v1_get_layer_surface(
             layerShell,
             waylandSurface,
-            output,
+            nullptr,
             ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
             "wal"
         );
@@ -469,9 +461,6 @@ private:
         }
         if (seat != nullptr) {
             wl_seat_destroy(seat);
-        }
-        if (output != nullptr) {
-            wl_output_destroy(output);
         }
         if (layerShell != nullptr) {
             zwlr_layer_shell_v1_destroy(layerShell);
