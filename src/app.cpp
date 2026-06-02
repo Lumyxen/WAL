@@ -30,6 +30,9 @@ constexpr std::array<float, 4> backgroundTint = {
     0.72f,
 };
 
+const ui::Color panelFill = ui::Color::srgb(0x2e, 0x38, 0x3c);
+const ui::Color panelBorder = ui::Color::srgb(0x7a, 0x84, 0x78);
+
 } // namespace
 
 bool QueueFamilyIndices::complete() const
@@ -936,6 +939,22 @@ void App::destroyUiVertexBuffer()
 void App::rebuildUi()
 {
     uiVertices.clear();
+
+    ui::Canvas canvas(static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height));
+
+    const float panelWidth = static_cast<float>(swapchainExtent.width) * 0.4f;
+    const float panelHeight = std::clamp(static_cast<float>(swapchainExtent.height) * 0.22f, 180.0f, 280.0f);
+    const ui::Rect panel{
+        (static_cast<float>(swapchainExtent.width) - panelWidth) * 0.5f,
+        (static_cast<float>(swapchainExtent.height) - panelHeight) * 0.5f,
+        panelWidth,
+        panelHeight,
+    };
+
+    canvas.box(panel, {.fill = panelFill, .border = panelBorder, .borderWidth = 1.0f});
+
+    const auto vertices = canvas.vertices();
+    uiVertices.assign(vertices.begin(), vertices.end());
 }
 
 VkShaderModule App::createShaderModule(const std::vector<char>& code)

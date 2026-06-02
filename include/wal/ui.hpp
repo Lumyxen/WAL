@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cmath>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -24,6 +25,26 @@ struct Color {
     float g = 1.0f;
     float b = 1.0f;
     float a = 1.0f;
+
+    [[nodiscard]] static Color srgb(uint8_t red, uint8_t green, uint8_t blue, float alpha = 1.0f)
+    {
+        return {
+            srgbToLinear(static_cast<float>(red) / 255.0f),
+            srgbToLinear(static_cast<float>(green) / 255.0f),
+            srgbToLinear(static_cast<float>(blue) / 255.0f),
+            alpha,
+        };
+    }
+
+private:
+    [[nodiscard]] static float srgbToLinear(float channel)
+    {
+        if (channel <= 0.04045f) {
+            return channel / 12.92f;
+        }
+
+        return std::pow((channel + 0.055f) / 1.055f, 2.4f);
+    }
 };
 
 struct Vertex {
@@ -32,20 +53,20 @@ struct Vertex {
 };
 
 struct BoxStyle {
-    Color fill{0.10f, 0.11f, 0.12f, 0.92f};
-    Color border{0.30f, 0.33f, 0.36f, 1.0f};
+    Color fill = Color::srgb(0x1c, 0x20, 0x23, 0.92f);
+    Color border = Color::srgb(0x27, 0x2e, 0x33);
     float borderWidth = 1.0f;
 };
 
 struct TextStyle {
-    Color color{0.86f, 0.88f, 0.90f, 1.0f};
+    Color color = Color::srgb(0xd3, 0xc6, 0xaa);
     float size = 14.0f;
 };
 
 struct ListStyle {
     BoxStyle container;
     BoxStyle item;
-    Color selectedFill{0.18f, 0.36f, 0.52f, 0.95f};
+    Color selectedFill = Color::srgb(0x2e, 0x38, 0x3c, 0.95f);
     float padding = 10.0f;
     float itemHeight = 38.0f;
     float itemGap = 6.0f;
@@ -53,7 +74,7 @@ struct ListStyle {
 
 struct TextFieldStyle {
     BoxStyle box;
-    Color cursor{0.90f, 0.93f, 0.96f, 1.0f};
+    Color cursor = Color::srgb(0xd3, 0xc6, 0xaa);
 };
 
 class Canvas {

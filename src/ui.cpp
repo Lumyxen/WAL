@@ -88,7 +88,7 @@ void Canvas::list(Rect rect, std::span<const std::string_view> items, uint32_t s
         auto itemStyle = style.item;
         if (i == selectedIndex) {
             itemStyle.fill = style.selectedFill;
-            itemStyle.border = {0.34f, 0.58f, 0.72f, 1.0f};
+            itemStyle.border = Color::srgb(0x7f, 0xbb, 0xca);
         }
 
         const Rect itemRect{rect.x + style.padding, y, itemWidth, style.itemHeight};
