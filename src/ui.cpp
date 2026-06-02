@@ -275,7 +275,8 @@ void Canvas::textField(
     bool focused,
     TextFieldStyle style,
     size_t cursorIndex,
-    size_t selectionAnchor
+    size_t selectionAnchor,
+    std::string_view placeholder
 )
 {
     box(rect, style.box);
@@ -303,7 +304,11 @@ void Canvas::textField(
         fillRect({selectionX, selectionY, selectionWidth, selectionHeight}, style.selection);
     }
 
-    text(textBounds, value, style.text);
+    if (value.empty()) {
+        text(textBounds, placeholder, style.placeholder);
+    } else {
+        text(textBounds, value, style.text);
+    }
 
     if (focused && !hasSelection) {
         const float cursorX = std::min(

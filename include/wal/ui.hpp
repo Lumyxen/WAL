@@ -75,6 +75,7 @@ struct ListStyle {
 
 struct TextFieldStyle {
     BoxStyle box;
+    TextStyle placeholder = {.color = Color::srgb(0x86, 0x8d, 0x80), .size = 16.0f};
     TextStyle text;
     Color selection = Color::srgb(0xa7, 0xc0, 0x80, 0.35f);
     Color cursor = Color::srgb(0xd3, 0xc6, 0xaa);
@@ -97,7 +98,8 @@ public:
         bool focused,
         TextFieldStyle style = {},
         size_t cursorIndex = 0,
-        size_t selectionAnchor = 0
+        size_t selectionAnchor = 0,
+        std::string_view placeholder = {}
     );
     void list(Rect rect, std::span<const std::string_view> items, uint32_t selectedIndex, ListStyle style = {});
 

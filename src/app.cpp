@@ -38,9 +38,12 @@ constexpr std::array<float, 4> backgroundTint = {
 const ui::Color panelFill = ui::Color::srgb(0x2e, 0x38, 0x3c);
 const ui::Color panelBorder = ui::Color::srgb(0x7a, 0x84, 0x78);
 const ui::Color textFieldFill = ui::Color::srgb(0x28, 0x30, 0x34);
+constexpr std::string_view textFieldPlaceholder = "Search";
+const ui::TextStyle textFieldPlaceholderStyle{.color = ui::Color::srgb(0x86, 0x8d, 0x80), .size = 16.0f};
 const ui::TextStyle textFieldText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 16.0f};
 constexpr float panelPadding = 18.0f;
 constexpr float textFieldHeight = 37.0f;
+constexpr float textFieldHorizontalTextInset = 8.0f;
 
 } // namespace
 
@@ -1370,7 +1373,11 @@ ui::Rect App::textFieldRect() const
 size_t App::textIndexAtPointer(float x) const
 {
     const ui::Rect field = textFieldRect();
-    return ui::textIndexAtOffset(textFieldValue, std::max(x - field.x - 8.0f, 0.0f), textFieldText);
+    return ui::textIndexAtOffset(
+        textFieldValue,
+        std::max(x - field.x - textFieldHorizontalTextInset, 0.0f),
+        textFieldText
+    );
 }
 
 void App::rebuildUi()
@@ -1397,10 +1404,12 @@ void App::rebuildUi()
         true,
         {
             .box = {.fill = textFieldFill, .borderWidth = 0.0f},
+            .placeholder = textFieldPlaceholderStyle,
             .text = textFieldText,
         },
         textCursorIndex,
-        textSelectionAnchor
+        textSelectionAnchor,
+        textFieldPlaceholder
     );
 
     const auto vertices = canvas.vertices();
