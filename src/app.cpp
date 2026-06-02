@@ -5,16 +5,21 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <poll.h>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <linux/input-event-codes.h>
+#include <wayland-client-protocol.h>
+#include <xkbcommon/xkbcommon-keysyms.h>
 
 namespace wal {
 namespace {
@@ -32,6 +37,8 @@ constexpr std::array<float, 4> backgroundTint = {
 
 const ui::Color panelFill = ui::Color::srgb(0x2e, 0x38, 0x3c);
 const ui::Color panelBorder = ui::Color::srgb(0x7a, 0x84, 0x78);
+const ui::Color textFieldFill = ui::Color::srgb(0x41, 0x4b, 0x50);
+const ui::TextStyle textFieldText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 16.0f};
 
 } // namespace
 
@@ -102,9 +109,53 @@ void App::layerSurfaceClosed(void* data, zwlr_layer_surface_v1*)
     static_cast<App*>(data)->running = false;
 }
 
-void App::keyboardKeymap(void*, wl_keyboard*, uint32_t, int32_t fd, uint32_t)
+void App::keyboardKeymap(void* data, wl_keyboard*, uint32_t format, int32_t fd, uint32_t size)
 {
+    auto* app = static_cast<App*>(data);
+    if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+        close(fd);
+        return;
+    }
+
+    void* map = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
+    if (map == MAP_FAILED) {
+        return;
+    }
+
+    if (app->xkbContext == nullptr) {
+        app->xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    }
+    if (app->xkbContext == nullptr) {
+        munmap(map, size);
+        return;
+    }
+
+    xkb_keymap* keymap = xkb_keymap_new_from_string(
+        app->xkbContext,
+        static_cast<const char*>(map),
+        XKB_KEYMAP_FORMAT_TEXT_V1,
+        XKB_KEYMAP_COMPILE_NO_FLAGS
+    );
+    munmap(map, size);
+    if (keymap == nullptr) {
+        return;
+    }
+
+    xkb_state* xkbState = xkb_state_new(keymap);
+    if (xkbState == nullptr) {
+        xkb_keymap_unref(keymap);
+        return;
+    }
+
+    if (app->xkbState != nullptr) {
+        xkb_state_unref(app->xkbState);
+    }
+    if (app->xkbKeymap != nullptr) {
+        xkb_keymap_unref(app->xkbKeymap);
+    }
+    app->xkbKeymap = keymap;
+    app->xkbState = xkbState;
 }
 
 void App::keyboardEnter(void*, wl_keyboard*, uint32_t, wl_surface*, wl_array*) {}
@@ -113,18 +164,164 @@ void App::keyboardLeave(void*, wl_keyboard*, uint32_t, wl_surface*) {}
 void App::keyboardKey(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t key, uint32_t state)
 {
     auto* app = static_cast<App*>(data);
-    if (key == KEY_ESC && state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+    if (state != WL_KEYBOARD_KEY_STATE_PRESSED) {
+        return;
+    }
+
+    if (app->xkbState == nullptr) {
+        return;
+    }
+
+    const xkb_keycode_t keycode = key + 8;
+    const xkb_keysym_t keysym = xkb_state_key_get_one_sym(app->xkbState, keycode);
+    const bool ctrl = xkb_state_mod_name_is_active(app->xkbState, XKB_MOD_NAME_CTRL, XKB_STATE_MODS_EFFECTIVE) != 0;
+    const bool shift = xkb_state_mod_name_is_active(app->xkbState, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) != 0;
+
+    if (keysym == XKB_KEY_Escape) {
         app->running = false;
+        return;
+    }
+
+    if (ctrl) {
+        switch (keysym) {
+        case XKB_KEY_a:
+        case XKB_KEY_A:
+            app->selectAllText();
+            return;
+        case XKB_KEY_c:
+        case XKB_KEY_C:
+            app->copySelectionToClipboard();
+            return;
+        case XKB_KEY_x:
+        case XKB_KEY_X:
+            app->cutSelectionToClipboard();
+            return;
+        case XKB_KEY_v:
+        case XKB_KEY_V:
+            app->pasteFromClipboard();
+            return;
+        case XKB_KEY_Left:
+            app->moveCursorByWord(false, shift);
+            return;
+        case XKB_KEY_Right:
+            app->moveCursorByWord(true, shift);
+            return;
+        case XKB_KEY_BackSpace:
+            if (app->hasTextSelection()) {
+                app->deleteSelection();
+            } else {
+                app->moveCursorByWord(false, true);
+                app->deleteSelection();
+            }
+            app->refreshUi();
+            return;
+        case XKB_KEY_Delete:
+            if (app->hasTextSelection()) {
+                app->deleteSelection();
+            } else {
+                app->moveCursorByWord(true, true);
+                app->deleteSelection();
+            }
+            app->refreshUi();
+            return;
+        default:
+            return;
+        }
+    }
+
+    switch (keysym) {
+    case XKB_KEY_Left:
+        app->moveCursor(app->textCursorIndex == 0 ? 0 : app->textCursorIndex - 1, shift);
+        return;
+    case XKB_KEY_Right:
+        app->moveCursor(std::min(app->textCursorIndex + 1, app->textFieldValue.size()), shift);
+        return;
+    case XKB_KEY_Home:
+        app->moveCursor(0, shift);
+        return;
+    case XKB_KEY_End:
+        app->moveCursor(app->textFieldValue.size(), shift);
+        return;
+    case XKB_KEY_BackSpace:
+        app->deleteBackward();
+        return;
+    case XKB_KEY_Delete:
+        app->deleteForward();
+        return;
+    default:
+        break;
+    }
+
+    if (shift && keysym != XKB_KEY_space && keysym < 0x20) {
+        return;
+    }
+
+    std::array<char, 8> text{};
+    const int length = xkb_state_key_get_utf8(app->xkbState, keycode, text.data(), text.size());
+    if (length == 1 && text[0] >= 0x20 && text[0] <= 0x7e) {
+        app->insertText(std::string_view{text.data(), static_cast<size_t>(length)});
     }
 }
 
-void App::keyboardModifiers(void*, wl_keyboard*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {}
+void App::keyboardModifiers(
+    void* data,
+    wl_keyboard*,
+    uint32_t,
+    uint32_t modsDepressed,
+    uint32_t modsLatched,
+    uint32_t modsLocked,
+    uint32_t group
+)
+{
+    auto* app = static_cast<App*>(data);
+    if (app->xkbState != nullptr) {
+        xkb_state_update_mask(app->xkbState, modsDepressed, modsLatched, modsLocked, 0, 0, group);
+    }
+}
 void App::keyboardRepeatInfo(void*, wl_keyboard*, int32_t, int32_t) {}
 
-void App::pointerEnter(void*, wl_pointer*, uint32_t, wl_surface*, wl_fixed_t, wl_fixed_t) {}
-void App::pointerLeave(void*, wl_pointer*, uint32_t, wl_surface*) {}
-void App::pointerMotion(void*, wl_pointer*, uint32_t, wl_fixed_t, wl_fixed_t) {}
-void App::pointerButton(void*, wl_pointer*, uint32_t, uint32_t, uint32_t, uint32_t) {}
+void App::pointerEnter(void* data, wl_pointer*, uint32_t, wl_surface*, wl_fixed_t surfaceX, wl_fixed_t surfaceY)
+{
+    auto* app = static_cast<App*>(data);
+    app->pointerX = static_cast<float>(wl_fixed_to_double(surfaceX));
+    app->pointerY = static_cast<float>(wl_fixed_to_double(surfaceY));
+}
+
+void App::pointerLeave(void* data, wl_pointer*, uint32_t, wl_surface*)
+{
+    static_cast<App*>(data)->mouseSelectingText = false;
+}
+
+void App::pointerMotion(void* data, wl_pointer*, uint32_t, wl_fixed_t surfaceX, wl_fixed_t surfaceY)
+{
+    auto* app = static_cast<App*>(data);
+    app->pointerX = static_cast<float>(wl_fixed_to_double(surfaceX));
+    app->pointerY = static_cast<float>(wl_fixed_to_double(surfaceY));
+    if (app->mouseSelectingText) {
+        app->moveCursor(app->textIndexAtPointer(app->pointerX), true);
+    }
+}
+
+void App::pointerButton(void* data, wl_pointer*, uint32_t, uint32_t, uint32_t button, uint32_t state)
+{
+    auto* app = static_cast<App*>(data);
+    if (button != BTN_LEFT) {
+        return;
+    }
+
+    if (state == WL_POINTER_BUTTON_STATE_PRESSED) {
+        const ui::Rect field = app->textFieldRect();
+        if (app->pointerX >= field.x && app->pointerX <= field.x + field.width &&
+            app->pointerY >= field.y && app->pointerY <= field.y + field.height) {
+            app->mouseSelectingText = true;
+            app->textCursorIndex = app->textIndexAtPointer(app->pointerX);
+            app->textSelectionAnchor = app->textCursorIndex;
+            app->refreshUi();
+        }
+    } else {
+        app->mouseSelectingText = false;
+    }
+}
 void App::pointerAxis(void*, wl_pointer*, uint32_t, uint32_t, wl_fixed_t) {}
 void App::pointerFrame(void*, wl_pointer*) {}
 void App::pointerAxisSource(void*, wl_pointer*, uint32_t) {}
@@ -318,6 +515,15 @@ void App::cleanup()
     }
     if (keyboard != nullptr) {
         wl_keyboard_release(keyboard);
+    }
+    if (xkbState != nullptr) {
+        xkb_state_unref(xkbState);
+    }
+    if (xkbKeymap != nullptr) {
+        xkb_keymap_unref(xkbKeymap);
+    }
+    if (xkbContext != nullptr) {
+        xkb_context_unref(xkbContext);
     }
     if (layerSurface != nullptr) {
         zwlr_layer_surface_v1_destroy(layerSurface);
@@ -936,6 +1142,203 @@ void App::destroyUiVertexBuffer()
     }
 }
 
+void App::refreshUi()
+{
+    if (device == VK_NULL_HANDLE || commandBuffers.empty()) {
+        return;
+    }
+
+    vkDeviceWaitIdle(device);
+    destroyUiVertexBuffer();
+    createUiVertexBuffer();
+
+    for (size_t i = 0; i < commandBuffers.size(); ++i) {
+        vkResetCommandBuffer(commandBuffers[i], 0);
+        recordCommandBuffer(commandBuffers[i], static_cast<uint32_t>(i));
+    }
+}
+
+bool App::hasTextSelection() const
+{
+    return textCursorIndex != textSelectionAnchor;
+}
+
+size_t App::textSelectionStart() const
+{
+    return std::min(textCursorIndex, textSelectionAnchor);
+}
+
+size_t App::textSelectionEnd() const
+{
+    return std::max(textCursorIndex, textSelectionAnchor);
+}
+
+void App::deleteSelection()
+{
+    if (!hasTextSelection()) {
+        return;
+    }
+
+    const size_t start = textSelectionStart();
+    textFieldValue.erase(start, textSelectionEnd() - start);
+    textCursorIndex = start;
+    textSelectionAnchor = start;
+}
+
+void App::insertText(std::string_view value)
+{
+    deleteSelection();
+
+    std::string sanitized;
+    sanitized.reserve(value.size());
+    for (const char character : value) {
+        if (character >= 0x20 && character <= 0x7e) {
+            sanitized.push_back(character);
+        }
+    }
+    if (sanitized.empty()) {
+        refreshUi();
+        return;
+    }
+
+    textFieldValue.insert(textCursorIndex, sanitized);
+    textCursorIndex += sanitized.size();
+    textSelectionAnchor = textCursorIndex;
+    refreshUi();
+}
+
+void App::deleteBackward()
+{
+    if (hasTextSelection()) {
+        deleteSelection();
+    } else if (textCursorIndex > 0) {
+        textFieldValue.erase(textCursorIndex - 1, 1);
+        --textCursorIndex;
+        textSelectionAnchor = textCursorIndex;
+    }
+    refreshUi();
+}
+
+void App::deleteForward()
+{
+    if (hasTextSelection()) {
+        deleteSelection();
+    } else if (textCursorIndex < textFieldValue.size()) {
+        textFieldValue.erase(textCursorIndex, 1);
+        textSelectionAnchor = textCursorIndex;
+    }
+    refreshUi();
+}
+
+void App::moveCursor(size_t nextIndex, bool extendSelection)
+{
+    textCursorIndex = std::min(nextIndex, textFieldValue.size());
+    if (!extendSelection) {
+        textSelectionAnchor = textCursorIndex;
+    }
+    refreshUi();
+}
+
+void App::moveCursorByWord(bool forward, bool extendSelection)
+{
+    size_t index = textCursorIndex;
+    if (forward) {
+        while (index < textFieldValue.size() &&
+               std::isalnum(static_cast<unsigned char>(textFieldValue[index])) == 0) {
+            ++index;
+        }
+        while (index < textFieldValue.size() &&
+               std::isalnum(static_cast<unsigned char>(textFieldValue[index])) != 0) {
+            ++index;
+        }
+    } else {
+        while (index > 0 && std::isalnum(static_cast<unsigned char>(textFieldValue[index - 1])) == 0) {
+            --index;
+        }
+        while (index > 0 && std::isalnum(static_cast<unsigned char>(textFieldValue[index - 1])) != 0) {
+            --index;
+        }
+    }
+    moveCursor(index, extendSelection);
+}
+
+void App::selectAllText()
+{
+    textSelectionAnchor = 0;
+    textCursorIndex = textFieldValue.size();
+    refreshUi();
+}
+
+void App::copySelectionToClipboard() const
+{
+    if (!hasTextSelection()) {
+        return;
+    }
+
+    FILE* pipe = popen("wl-copy", "w");
+    if (pipe == nullptr) {
+        return;
+    }
+    const std::string_view selection{
+        textFieldValue.data() + textSelectionStart(),
+        textSelectionEnd() - textSelectionStart(),
+    };
+    fwrite(selection.data(), 1, selection.size(), pipe);
+    pclose(pipe);
+}
+
+void App::cutSelectionToClipboard()
+{
+    if (!hasTextSelection()) {
+        return;
+    }
+
+    copySelectionToClipboard();
+    deleteSelection();
+    refreshUi();
+}
+
+void App::pasteFromClipboard()
+{
+    FILE* pipe = popen("wl-paste -n", "r");
+    if (pipe == nullptr) {
+        return;
+    }
+
+    std::string pasted;
+    std::array<char, 256> buffer{};
+    while (const size_t count = fread(buffer.data(), 1, buffer.size(), pipe)) {
+        pasted.append(buffer.data(), count);
+    }
+    pclose(pipe);
+    insertText(pasted);
+}
+
+ui::Rect App::textFieldRect() const
+{
+    const float panelWidth = static_cast<float>(swapchainExtent.width) * 0.4f;
+    const float panelHeight = std::clamp(static_cast<float>(swapchainExtent.height) * 0.22f, 180.0f, 280.0f);
+    const ui::Rect panel{
+        (static_cast<float>(swapchainExtent.width) - panelWidth) * 0.5f,
+        (static_cast<float>(swapchainExtent.height) - panelHeight) * 0.5f,
+        panelWidth,
+        panelHeight,
+    };
+
+    return {
+        panel.x,
+        panel.y - 24.0f,
+        panel.width,
+        24.0f,
+    };
+}
+
+size_t App::textIndexAtPointer(float x) const
+{
+    const ui::Rect field = textFieldRect();
+    return ui::textIndexAtOffset(textFieldValue, std::max(x - field.x - 14.0f, 0.0f), textFieldText);
+}
+
 void App::rebuildUi()
 {
     uiVertices.clear();
@@ -952,6 +1355,19 @@ void App::rebuildUi()
     };
 
     canvas.box(panel, {.fill = panelFill, .border = panelBorder, .borderWidth = 1.0f});
+
+    const ui::Rect textField = textFieldRect();
+    canvas.textField(
+        textField,
+        textFieldValue,
+        true,
+        {
+            .box = {.fill = textFieldFill, .border = panelBorder, .borderWidth = 1.0f},
+            .text = textFieldText,
+        },
+        textCursorIndex,
+        textSelectionAnchor
+    );
 
     const auto vertices = canvas.vertices();
     uiVertices.assign(vertices.begin(), vertices.end());

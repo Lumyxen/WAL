@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cmath>
 #include <span>
@@ -74,8 +75,13 @@ struct ListStyle {
 
 struct TextFieldStyle {
     BoxStyle box;
+    TextStyle text;
+    Color selection = Color::srgb(0xa7, 0xc0, 0x80, 0.35f);
     Color cursor = Color::srgb(0xd3, 0xc6, 0xaa);
 };
+
+[[nodiscard]] float textWidth(std::string_view value, TextStyle style = {}, size_t endIndex = std::string_view::npos);
+[[nodiscard]] size_t textIndexAtOffset(std::string_view value, float offset, TextStyle style = {});
 
 class Canvas {
 public:
@@ -85,7 +91,14 @@ public:
     void box(Rect rect, BoxStyle style = {});
     void line(Vec2 from, Vec2 to, float thickness, Color color);
     void text(Rect bounds, std::string_view value, TextStyle style = {});
-    void textField(Rect rect, std::string_view value, bool focused, TextFieldStyle style = {});
+    void textField(
+        Rect rect,
+        std::string_view value,
+        bool focused,
+        TextFieldStyle style = {},
+        size_t cursorIndex = 0,
+        size_t selectionAnchor = 0
+    );
     void list(Rect rect, std::span<const std::string_view> items, uint32_t selectedIndex, ListStyle style = {});
 
     [[nodiscard]] std::span<const Vertex> vertices() const;

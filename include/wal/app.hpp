@@ -7,9 +7,11 @@
 #include "wal/ui.hpp"
 
 #include <wayland-client.h>
+#include <xkbcommon/xkbcommon.h>
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace wal {
@@ -38,6 +40,9 @@ private:
     wl_seat* seat = nullptr;
     wl_keyboard* keyboard = nullptr;
     wl_pointer* pointer = nullptr;
+    xkb_context* xkbContext = nullptr;
+    xkb_keymap* xkbKeymap = nullptr;
+    xkb_state* xkbState = nullptr;
     wl_surface* waylandSurface = nullptr;
     zwlr_layer_shell_v1* layerShell = nullptr;
     zwlr_layer_surface_v1* layerSurface = nullptr;
@@ -47,6 +52,12 @@ private:
     bool framebufferResized = false;
     uint32_t surfaceWidth = 0;
     uint32_t surfaceHeight = 0;
+    std::string textFieldValue;
+    size_t textCursorIndex = 0;
+    size_t textSelectionAnchor = 0;
+    float pointerX = 0.0f;
+    float pointerY = 0.0f;
+    bool mouseSelectingText = false;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -153,6 +164,23 @@ private:
     void cleanupSwapchain();
     void destroyUiVertexBuffer();
     void rebuildUi();
+    void refreshUi();
+    void insertText(std::string_view value);
+    void deleteBackward();
+    void deleteForward();
+    void deleteSelection();
+    void moveCursor(size_t nextIndex, bool extendSelection);
+    void moveCursorByWord(bool forward, bool extendSelection);
+    void selectAllText();
+    void copySelectionToClipboard() const;
+    void cutSelectionToClipboard();
+    void pasteFromClipboard();
+
+    [[nodiscard]] ui::Rect textFieldRect() const;
+    [[nodiscard]] bool hasTextSelection() const;
+    [[nodiscard]] size_t textSelectionStart() const;
+    [[nodiscard]] size_t textSelectionEnd() const;
+    [[nodiscard]] size_t textIndexAtPointer(float x) const;
 
     [[nodiscard]] VkShaderModule createShaderModule(const std::vector<char>& code);
     [[nodiscard]] bool isDeviceSuitable(VkPhysicalDevice candidate);

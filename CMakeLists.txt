@@ -8,6 +8,9 @@ project(wal
 find_package(Vulkan REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
+pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
+pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 
 add_executable(wal
     src/app.cpp
@@ -19,7 +22,15 @@ add_executable(wal
 
 target_compile_features(wal PRIVATE cxx_std_23)
 target_include_directories(wal PRIVATE include)
-target_link_libraries(wal PRIVATE Vulkan::Vulkan PkgConfig::WAYLAND_CLIENT)
+target_link_libraries(
+    wal
+    PRIVATE
+        Vulkan::Vulkan
+        PkgConfig::WAYLAND_CLIENT
+        PkgConfig::XKBCOMMON
+        PkgConfig::FREETYPE
+        PkgConfig::FONTCONFIG
+)
 target_compile_definitions(wal PRIVATE SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
 
 find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
