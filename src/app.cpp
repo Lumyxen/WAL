@@ -23,6 +23,13 @@ const std::vector<const char*> deviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
+constexpr std::array<float, 4> backgroundTint = {
+    0.012983f,
+    0.016807f,
+    0.019382f,
+    0.72f,
+};
+
 } // namespace
 
 bool QueueFamilyIndices::complete() const
@@ -771,7 +778,7 @@ void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex
         throw std::runtime_error("failed to begin command buffer");
     }
 
-    VkClearValue clearColor = {{{0.0f, 0.0f, 0.0f, 0.0f}}};
+    VkClearValue clearColor = {{{backgroundTint[0], backgroundTint[1], backgroundTint[2], backgroundTint[3]}}};
 
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
