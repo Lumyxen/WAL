@@ -10,18 +10,23 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
 
 add_executable(wal
+    src/app.cpp
+    src/io.cpp
+    src/layer_shell.cpp
     src/main.cpp
+    src/ui.cpp
 )
 
 target_compile_features(wal PRIVATE cxx_std_23)
+target_include_directories(wal PRIVATE include)
 target_link_libraries(wal PRIVATE Vulkan::Vulkan PkgConfig::WAYLAND_CLIENT)
 target_compile_definitions(wal PRIVATE SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
 
 find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
 
 set(SHADER_SOURCES
-    src/shaders/background.vert
-    src/shaders/background.frag
+    src/shaders/ui.vert
+    src/shaders/ui.frag
 )
 
 set(SPIRV_SHADERS)
