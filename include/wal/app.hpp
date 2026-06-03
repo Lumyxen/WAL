@@ -40,6 +40,8 @@ struct DesktopEntry {
     std::string workingDirectory;
     std::string searchText;
     std::string searchAcronym;
+    std::string searchNameText;
+    std::string searchNameAcronym;
     ui::Bitmap icon;
     bool iconLoaded = false;
     bool pinned = false;

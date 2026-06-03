@@ -152,6 +152,34 @@ bool desktopEntryMatchesQuery(const DesktopEntry& entry, std::string_view query)
         entry.searchAcronym.find(query) != std::string::npos;
 }
 
+bool desktopEntryNameMatchesQuery(const DesktopEntry& entry, std::string_view query)
+{
+    return entry.searchNameText.find(query) != std::string::npos ||
+        entry.searchNameAcronym.find(query) != std::string::npos;
+}
+
+int desktopEntryMatchRank(const DesktopEntry& entry, std::string_view query)
+{
+    if (desktopEntryNameMatchesQuery(entry, query)) {
+        return 0;
+    }
+    if (desktopEntryMatchesQuery(entry, query)) {
+        return 1;
+    }
+    return 2;
+}
+
+bool desktopEntryOrderLess(const DesktopEntry* left, const DesktopEntry* right)
+{
+    if (left->pinned != right->pinned) {
+        return left->pinned;
+    }
+    if (left->pinned && left->pinOrder != right->pinOrder) {
+        return left->pinOrder < right->pinOrder;
+    }
+    return left->name < right->name;
+}
+
 bool parseBool(std::string_view value)
 {
     const std::string normalized = lowercase(trim(value));
@@ -643,6 +671,8 @@ std::optional<DesktopEntry> parseDesktopEntry(const std::filesystem::path& path)
         .workingDirectory = workingDirectory,
         .searchText = searchText,
         .searchAcronym = searchAcronym(rawSearchText),
+        .searchNameText = lowercase(name),
+        .searchNameAcronym = searchAcronym(name),
     };
 }
 
@@ -2533,6 +2563,14 @@ std::vector<const DesktopEntry*> App::filteredDesktopEntries() const
             }
             entries.push_back(&entry);
         }
+        std::ranges::stable_sort(entries, [query](const DesktopEntry* left, const DesktopEntry* right) {
+            const int leftRank = desktopEntryMatchRank(*left, query);
+            const int rightRank = desktopEntryMatchRank(*right, query);
+            if (leftRank != rightRank) {
+                return leftRank < rightRank;
+            }
+            return desktopEntryOrderLess(left, right);
+        });
     }
     return entries;
 }
@@ -2543,29 +2581,40 @@ std::vector<DesktopEntry*> App::visibleDesktopEntries()
     entries.reserve(maxVisibleDesktopEntries);
 
     const std::string query = lowercase(textFieldValue);
-    size_t matchIndex = 0;
-    const auto appendIfVisible = [&](DesktopEntry& entry) {
-        if (!query.empty() && !desktopEntryMatchesQuery(entry, query)) {
-            return false;
-        }
-
-        if (matchIndex++ < firstVisibleDesktopEntryIndex) {
-            return false;
-        }
-
-        entries.push_back(&entry);
-        return entries.size() == maxVisibleDesktopEntries;
-    };
-
     if (query.empty()) {
+        size_t matchIndex = 0;
         for (DesktopEntry* entry : orderedDesktopEntries()) {
-            if (appendIfVisible(*entry)) {
+            if (matchIndex++ < firstVisibleDesktopEntryIndex) {
+                continue;
+            }
+            entries.push_back(entry);
+            if (entries.size() == maxVisibleDesktopEntries) {
                 break;
             }
         }
     } else {
+        std::vector<DesktopEntry*> matches;
         for (auto& entry : desktopEntries) {
-            if (appendIfVisible(entry)) {
+            if (desktopEntryMatchesQuery(entry, query)) {
+                matches.push_back(&entry);
+            }
+        }
+        std::ranges::stable_sort(matches, [query](const DesktopEntry* left, const DesktopEntry* right) {
+            const int leftRank = desktopEntryMatchRank(*left, query);
+            const int rightRank = desktopEntryMatchRank(*right, query);
+            if (leftRank != rightRank) {
+                return leftRank < rightRank;
+            }
+            return desktopEntryOrderLess(left, right);
+        });
+
+        size_t matchIndex = 0;
+        for (DesktopEntry* entry : matches) {
+            if (matchIndex++ < firstVisibleDesktopEntryIndex) {
+                continue;
+            }
+            entries.push_back(entry);
+            if (entries.size() == maxVisibleDesktopEntries) {
                 break;
             }
         }
@@ -2582,15 +2631,7 @@ std::vector<DesktopEntry*> App::orderedDesktopEntries()
         entries.push_back(&entry);
     }
 
-    std::ranges::stable_sort(entries, [](const DesktopEntry* left, const DesktopEntry* right) {
-        if (left->pinned != right->pinned) {
-            return left->pinned;
-        }
-        if (left->pinned && left->pinOrder != right->pinOrder) {
-            return left->pinOrder < right->pinOrder;
-        }
-        return left->name < right->name;
-    });
+    std::ranges::stable_sort(entries, desktopEntryOrderLess);
     return entries;
 }
 
@@ -2602,15 +2643,7 @@ std::vector<const DesktopEntry*> App::orderedDesktopEntries() const
         entries.push_back(&entry);
     }
 
-    std::ranges::stable_sort(entries, [](const DesktopEntry* left, const DesktopEntry* right) {
-        if (left->pinned != right->pinned) {
-            return left->pinned;
-        }
-        if (left->pinned && left->pinOrder != right->pinOrder) {
-            return left->pinOrder < right->pinOrder;
-        }
-        return left->name < right->name;
-    });
+    std::ranges::stable_sort(entries, desktopEntryOrderLess);
     return entries;
 }
 
@@ -2626,12 +2659,23 @@ DesktopEntry* App::selectedDesktopEntry()
             }
         }
     } else {
+        std::vector<DesktopEntry*> matches;
         for (auto& entry : desktopEntries) {
-            if (!desktopEntryMatchesQuery(entry, query)) {
-                continue;
+            if (desktopEntryMatchesQuery(entry, query)) {
+                matches.push_back(&entry);
             }
+        }
+        std::ranges::stable_sort(matches, [query](const DesktopEntry* left, const DesktopEntry* right) {
+            const int leftRank = desktopEntryMatchRank(*left, query);
+            const int rightRank = desktopEntryMatchRank(*right, query);
+            if (leftRank != rightRank) {
+                return leftRank < rightRank;
+            }
+            return desktopEntryOrderLess(left, right);
+        });
+        for (DesktopEntry* entry : matches) {
             if (matchIndex++ == selectedDesktopEntryIndex) {
-                return &entry;
+                return entry;
             }
         }
     }
