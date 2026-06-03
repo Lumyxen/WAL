@@ -1813,6 +1813,12 @@ void App::setInputRegion()
         throw std::runtime_error("failed to create Wayland input region");
     }
 
+    const uint32_t width = swapchainExtent.width == 0 ? surfaceWidth : swapchainExtent.width;
+    const uint32_t height = swapchainExtent.height == 0 ? surfaceHeight : swapchainExtent.height;
+    if (width > 0 && height > 0) {
+        wl_region_add(inputRegion.get(), 0, 0, static_cast<int32_t>(width), static_cast<int32_t>(height));
+    }
+
     wl_surface_set_input_region(waylandSurface, inputRegion.get());
     wl_surface_commit(waylandSurface);
 }
@@ -2789,6 +2795,9 @@ void App::uploadUiVertexBuffer(size_t frameIndex)
 
 void App::refreshUi()
 {
+    if (waylandSurface != nullptr && compositor != nullptr) {
+        setInputRegion();
+    }
     uiDirty = true;
 }
 
