@@ -41,6 +41,8 @@ struct DesktopEntry {
     std::string searchText;
     ui::Bitmap icon;
     bool iconLoaded = false;
+    bool pinned = false;
+    int pinOrder = -1;
 };
 
 class App {
@@ -168,6 +170,8 @@ private:
 
     void initWindow();
     void loadDesktopEntries();
+    void loadPinnedDesktopEntries();
+    void savePinnedDesktopEntries() const;
     void setInputRegion();
     void initVulkan();
     void mainLoop();
@@ -212,8 +216,11 @@ private:
     void resetDesktopNavigation();
     void clampDesktopNavigation();
     void moveDesktopSelection(int delta);
+    void toggleSelectedDesktopEntryPin();
+    void moveSelectedDesktopEntryPin(int delta);
     void launchSelectedDesktopEntry();
     void launchDesktopEntry(const DesktopEntry& entry);
+    void selectDesktopEntry(const DesktopEntry* entry);
 
     [[nodiscard]] ui::Rect textFieldRect() const;
     [[nodiscard]] ui::Rect desktopListRect() const;
@@ -222,6 +229,9 @@ private:
     [[nodiscard]] size_t visibleDesktopEntryCount() const;
     [[nodiscard]] std::vector<const DesktopEntry*> filteredDesktopEntries() const;
     [[nodiscard]] std::vector<DesktopEntry*> visibleDesktopEntries();
+    [[nodiscard]] std::vector<DesktopEntry*> orderedDesktopEntries();
+    [[nodiscard]] std::vector<const DesktopEntry*> orderedDesktopEntries() const;
+    [[nodiscard]] DesktopEntry* selectedDesktopEntry();
     [[nodiscard]] bool hasTextSelection() const;
     [[nodiscard]] size_t textSelectionStart() const;
     [[nodiscard]] size_t textSelectionEnd() const;

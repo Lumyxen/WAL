@@ -12,6 +12,7 @@ pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 pkg_check_modules(FREETYPE REQUIRED IMPORTED_TARGET freetype2)
 pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
 pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0)
+pkg_check_modules(LIBRSVG REQUIRED IMPORTED_TARGET librsvg-2.0)
 
 add_executable(wal
     src/app.cpp
@@ -32,6 +33,7 @@ target_link_libraries(
         PkgConfig::FREETYPE
         PkgConfig::FONTCONFIG
         PkgConfig::GDK_PIXBUF
+        PkgConfig::LIBRSVG
 )
 target_compile_definitions(wal PRIVATE SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
 

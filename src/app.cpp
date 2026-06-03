@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cctype>
 #include <cstddef>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -23,8 +24,10 @@
 #include <sys/timerfd.h>
 #include <unistd.h>
 
+#include <cairo.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 #include <linux/input-event-codes.h>
+#include <librsvg/rsvg.h>
 #include <wayland-client-protocol.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 
@@ -56,8 +59,12 @@ constexpr size_t maxVisibleDesktopEntries = 8;
 constexpr float listTopGap = 12.0f;
 constexpr float desktopIconSize = 30.0f;
 constexpr float desktopIconTextGap = 12.0f;
+constexpr float desktopPinIconSize = 17.0f;
+constexpr float desktopPinTextGap = 10.0f;
 const ui::TextStyle desktopEntryText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 15.0f};
 const ui::Color desktopEntryMatchHighlight = ui::Color::srgb(0x3c, 0x48, 0x41);
+constexpr std::string_view pinIconSvg =
+    R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#d3c6aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>)";
 
 std::string trim(std::string_view value)
 {
@@ -230,25 +237,25 @@ std::optional<std::filesystem::path> resolveIconPath(std::string_view iconName)
     return std::nullopt;
 }
 
-ui::Bitmap loadIconBitmap(std::string_view iconName)
+std::filesystem::path stateDirectory()
 {
-    const auto iconPath = resolveIconPath(iconName);
-    if (!iconPath.has_value()) {
-        return {};
+    if (const char* stateHome = std::getenv("XDG_STATE_HOME"); stateHome != nullptr && *stateHome != '\0') {
+        return std::filesystem::path(stateHome) / "wal";
     }
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        return std::filesystem::path(home) / ".local/state/wal";
+    }
+    return std::filesystem::path(".wal-state");
+}
 
-    GError* error = nullptr;
-    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
-        iconPath->c_str(),
-        static_cast<int>(desktopIconSize),
-        static_cast<int>(desktopIconSize),
-        TRUE,
-        &error
-    );
+std::filesystem::path pinnedDesktopEntriesPath()
+{
+    return stateDirectory() / "pinned-apps";
+}
+
+ui::Bitmap pixbufToBitmap(GdkPixbuf* pixbuf)
+{
     if (pixbuf == nullptr) {
-        if (error != nullptr) {
-            g_error_free(error);
-        }
         return {};
     }
 
@@ -273,6 +280,172 @@ ui::Bitmap loadIconBitmap(std::string_view iconName)
         }
     }
 
+    return bitmap;
+}
+
+std::vector<float> renderSvgAlphaMask(std::string_view svg, uint32_t size)
+{
+    GError* error = nullptr;
+    RsvgHandle* handle = rsvg_handle_new_from_data(
+        reinterpret_cast<const guint8*>(svg.data()),
+        svg.size(),
+        &error
+    );
+    if (handle == nullptr) {
+        if (error != nullptr) {
+            g_error_free(error);
+        }
+        return {};
+    }
+
+    cairo_surface_t* surface = cairo_image_surface_create(
+        CAIRO_FORMAT_ARGB32,
+        static_cast<int>(size),
+        static_cast<int>(size)
+    );
+    cairo_t* cairo = cairo_create(surface);
+    cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cairo);
+    cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
+
+    const RsvgRectangle viewport{
+        .x = 0.0,
+        .y = 0.0,
+        .width = static_cast<double>(size),
+        .height = static_cast<double>(size),
+    };
+    const gboolean rendered = rsvg_handle_render_document(handle, cairo, &viewport, &error);
+    cairo_destroy(cairo);
+    g_object_unref(handle);
+
+    if (rendered == FALSE) {
+        if (error != nullptr) {
+            g_error_free(error);
+        }
+        cairo_surface_destroy(surface);
+        return {};
+    }
+
+    cairo_surface_flush(surface);
+    const int stride = cairo_image_surface_get_stride(surface);
+    const unsigned char* data = cairo_image_surface_get_data(surface);
+    std::vector<float> alphaMask(static_cast<size_t>(size) * size, 0.0f);
+    for (uint32_t y = 0; y < size; ++y) {
+        const unsigned char* row = data + static_cast<size_t>(y) * static_cast<size_t>(stride);
+        for (uint32_t x = 0; x < size; ++x) {
+            alphaMask[static_cast<size_t>(y) * size + x] =
+                static_cast<float>(row[static_cast<size_t>(x) * 4 + 3]) / 255.0f;
+        }
+    }
+
+    cairo_surface_destroy(surface);
+    return alphaMask;
+}
+
+ui::Bitmap sdfBitmapFromAlphaMask(
+    std::span<const float> alphaMask,
+    uint32_t maskSize,
+    uint32_t outputSize,
+    ui::Color color
+)
+{
+    if (alphaMask.size() < static_cast<size_t>(maskSize) * maskSize || maskSize == 0 || outputSize == 0) {
+        return {};
+    }
+
+    ui::Bitmap bitmap{
+        .width = outputSize,
+        .height = outputSize,
+    };
+    bitmap.pixels.reserve(static_cast<size_t>(outputSize) * outputSize);
+
+    const float scale = static_cast<float>(maskSize) / static_cast<float>(outputSize);
+    const int maxSearchRadius = static_cast<int>(std::ceil(scale * 5.0f));
+    constexpr float edgeWidth = 0.85f;
+
+    const auto alphaAt = [&](int x, int y) {
+        x = std::clamp(x, 0, static_cast<int>(maskSize) - 1);
+        y = std::clamp(y, 0, static_cast<int>(maskSize) - 1);
+        return alphaMask[static_cast<size_t>(y) * maskSize + static_cast<size_t>(x)];
+    };
+
+    for (uint32_t y = 0; y < outputSize; ++y) {
+        for (uint32_t x = 0; x < outputSize; ++x) {
+            const float maskX = (static_cast<float>(x) + 0.5f) * scale - 0.5f;
+            const float maskY = (static_cast<float>(y) + 0.5f) * scale - 0.5f;
+            const int centerX = static_cast<int>(std::round(maskX));
+            const int centerY = static_cast<int>(std::round(maskY));
+            const bool inside = alphaAt(centerX, centerY) >= 0.5f;
+
+            float nearestDistanceSq = std::numeric_limits<float>::max();
+            for (int offsetY = -maxSearchRadius; offsetY <= maxSearchRadius; ++offsetY) {
+                for (int offsetX = -maxSearchRadius; offsetX <= maxSearchRadius; ++offsetX) {
+                    const int sampleX = centerX + offsetX;
+                    const int sampleY = centerY + offsetY;
+                    if (sampleX < 0 || sampleY < 0 ||
+                        sampleX >= static_cast<int>(maskSize) || sampleY >= static_cast<int>(maskSize)) {
+                        continue;
+                    }
+
+                    if ((alphaAt(sampleX, sampleY) >= 0.5f) == inside) {
+                        continue;
+                    }
+
+                    const float dx = static_cast<float>(sampleX) - maskX;
+                    const float dy = static_cast<float>(sampleY) - maskY;
+                    nearestDistanceSq = std::min(nearestDistanceSq, dx * dx + dy * dy);
+                }
+            }
+
+            float alpha = inside ? 1.0f : 0.0f;
+            if (nearestDistanceSq != std::numeric_limits<float>::max()) {
+                const float signedDistance = (inside ? 1.0f : -1.0f) * std::sqrt(nearestDistanceSq) / scale;
+                alpha = std::clamp(0.5f + signedDistance / edgeWidth, 0.0f, 1.0f);
+            }
+
+            ui::Color pixel = color;
+            pixel.a *= alpha;
+            bitmap.pixels.push_back(pixel);
+        }
+    }
+
+    return bitmap;
+}
+
+const ui::Bitmap& pinIconBitmap()
+{
+    static const ui::Bitmap bitmap = [] {
+        constexpr uint32_t outputSize = static_cast<uint32_t>(desktopPinIconSize);
+        constexpr uint32_t sourceScale = 8;
+        const std::vector<float> alphaMask = renderSvgAlphaMask(pinIconSvg, outputSize * sourceScale);
+        return sdfBitmapFromAlphaMask(alphaMask, outputSize * sourceScale, outputSize, desktopEntryText.color);
+    }();
+    return bitmap;
+}
+
+ui::Bitmap loadIconBitmap(std::string_view iconName)
+{
+    const auto iconPath = resolveIconPath(iconName);
+    if (!iconPath.has_value()) {
+        return {};
+    }
+
+    GError* error = nullptr;
+    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
+        iconPath->c_str(),
+        static_cast<int>(desktopIconSize),
+        static_cast<int>(desktopIconSize),
+        TRUE,
+        &error
+    );
+    if (pixbuf == nullptr) {
+        if (error != nullptr) {
+            g_error_free(error);
+        }
+        return {};
+    }
+
+    ui::Bitmap bitmap = pixbufToBitmap(pixbuf);
     g_object_unref(pixbuf);
     return bitmap;
 }
@@ -829,6 +1002,57 @@ void App::loadDesktopEntries()
     }
 
     std::ranges::sort(desktopEntries, {}, &DesktopEntry::name);
+    loadPinnedDesktopEntries();
+}
+
+void App::loadPinnedDesktopEntries()
+{
+    for (auto& entry : desktopEntries) {
+        entry.pinned = false;
+        entry.pinOrder = -1;
+    }
+
+    std::ifstream file(pinnedDesktopEntriesPath());
+    if (!file) {
+        return;
+    }
+
+    int pinOrder = 0;
+    std::string name;
+    while (std::getline(file, name)) {
+        if (name.empty()) {
+            continue;
+        }
+
+        for (auto& entry : desktopEntries) {
+            if (!entry.pinned && entry.name == name) {
+                entry.pinned = true;
+                entry.pinOrder = pinOrder++;
+                break;
+            }
+        }
+    }
+}
+
+void App::savePinnedDesktopEntries() const
+{
+    std::error_code error;
+    std::filesystem::create_directories(stateDirectory(), error);
+    if (error) {
+        return;
+    }
+
+    std::ofstream file(pinnedDesktopEntriesPath());
+    if (!file) {
+        return;
+    }
+
+    for (const DesktopEntry* entry : orderedDesktopEntries()) {
+        if (!entry->pinned) {
+            break;
+        }
+        file << entry->name << '\n';
+    }
 }
 
 void App::setInputRegion()
@@ -1701,6 +1925,12 @@ bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
                 pasteFromClipboard();
             }
             return false;
+        case XKB_KEY_p:
+        case XKB_KEY_P:
+            if (allowSingleShotShortcuts) {
+                toggleSelectedDesktopEntryPin();
+            }
+            return false;
         case XKB_KEY_Left:
             moveCursorByWord(false, shift);
             return true;
@@ -1732,10 +1962,18 @@ bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
 
     switch (keysym) {
     case XKB_KEY_Up:
-        moveDesktopSelection(-1);
+        if (shift) {
+            moveSelectedDesktopEntryPin(-1);
+        } else {
+            moveDesktopSelection(-1);
+        }
         return true;
     case XKB_KEY_Down:
-        moveDesktopSelection(1);
+        if (shift) {
+            moveSelectedDesktopEntryPin(1);
+        } else {
+            moveDesktopSelection(1);
+        }
         return true;
     case XKB_KEY_Page_Up:
         moveDesktopSelection(-static_cast<int>(maxVisibleDesktopEntries));
@@ -1980,6 +2218,69 @@ void App::moveDesktopSelection(int delta)
     refreshUi();
 }
 
+void App::toggleSelectedDesktopEntryPin()
+{
+    DesktopEntry* entry = selectedDesktopEntry();
+    if (entry == nullptr) {
+        return;
+    }
+
+    if (entry->pinned) {
+        entry->pinned = false;
+        entry->pinOrder = -1;
+    } else {
+        int nextPinOrder = 0;
+        for (const auto& desktopEntry : desktopEntries) {
+            if (desktopEntry.pinned) {
+                nextPinOrder = std::max(nextPinOrder, desktopEntry.pinOrder + 1);
+            }
+        }
+        entry->pinned = true;
+        entry->pinOrder = nextPinOrder;
+    }
+
+    selectDesktopEntry(entry);
+    savePinnedDesktopEntries();
+    refreshUi();
+}
+
+void App::moveSelectedDesktopEntryPin(int delta)
+{
+    DesktopEntry* entry = selectedDesktopEntry();
+    if (entry == nullptr || !entry->pinned || delta == 0) {
+        return;
+    }
+
+    std::vector<DesktopEntry*> pins;
+    for (auto& desktopEntry : desktopEntries) {
+        if (desktopEntry.pinned) {
+            pins.push_back(&desktopEntry);
+        }
+    }
+    std::ranges::sort(pins, [](const DesktopEntry* left, const DesktopEntry* right) {
+        if (left->pinOrder != right->pinOrder) {
+            return left->pinOrder < right->pinOrder;
+        }
+        return left->name < right->name;
+    });
+
+    const auto current = std::ranges::find(pins, entry);
+    if (current == pins.end()) {
+        return;
+    }
+
+    const int currentIndex = static_cast<int>(current - pins.begin());
+    const int nextIndex = std::clamp(currentIndex + delta, 0, static_cast<int>(pins.size() - 1));
+    if (nextIndex == currentIndex) {
+        return;
+    }
+
+    std::swap(entry->pinOrder, pins[static_cast<size_t>(nextIndex)]->pinOrder);
+    selectDesktopEntry(entry);
+    savePinnedDesktopEntries();
+    refreshUi();
+}
+
 void App::launchSelectedDesktopEntry()
 {
     const std::vector<const DesktopEntry*> entries = filteredDesktopEntries();
@@ -1988,6 +2289,23 @@ void App::launchSelectedDesktopEntry()
     }
 
     launchDesktopEntry(*entries[selectedDesktopEntryIndex]);
+}
+
+void App::selectDesktopEntry(const DesktopEntry* entry)
+{
+    if (entry == nullptr) {
+        return;
+    }
+
+    const std::vector<const DesktopEntry*> entries = filteredDesktopEntries();
+    const auto selected = std::ranges::find(entries, entry);
+    if (selected == entries.end()) {
+        clampDesktopNavigation();
+        return;
+    }
+
+    selectedDesktopEntryIndex = static_cast<size_t>(selected - entries.begin());
+    clampDesktopNavigation();
 }
 
 void App::launchDesktopEntry(const DesktopEntry& entry)
@@ -2106,28 +2424,24 @@ ui::Rect App::panelRect(size_t visibleResultCount) const
 
 size_t App::visibleDesktopEntryCount() const
 {
-    size_t count = 0;
-    const std::string query = lowercase(textFieldValue);
-    for (const auto& entry : desktopEntries) {
-        if (!query.empty() && entry.searchText.find(query) == std::string::npos) {
-            continue;
-        }
-
-        ++count;
-    }
-
-    return count;
+    return filteredDesktopEntries().size();
 }
 
 std::vector<const DesktopEntry*> App::filteredDesktopEntries() const
 {
     std::vector<const DesktopEntry*> entries;
     const std::string query = lowercase(textFieldValue);
-    for (const auto& entry : desktopEntries) {
-        if (!query.empty() && entry.searchText.find(query) == std::string::npos) {
-            continue;
+    if (query.empty()) {
+        for (const DesktopEntry* entry : orderedDesktopEntries()) {
+            entries.push_back(entry);
         }
-        entries.push_back(&entry);
+    } else {
+        for (const auto& entry : desktopEntries) {
+            if (entry.searchText.find(query) == std::string::npos) {
+                continue;
+            }
+            entries.push_back(&entry);
+        }
     }
     return entries;
 }
@@ -2139,22 +2453,99 @@ std::vector<DesktopEntry*> App::visibleDesktopEntries()
 
     const std::string query = lowercase(textFieldValue);
     size_t matchIndex = 0;
-    for (auto& entry : desktopEntries) {
+    const auto appendIfVisible = [&](DesktopEntry& entry) {
         if (!query.empty() && entry.searchText.find(query) == std::string::npos) {
-            continue;
+            return false;
         }
 
         if (matchIndex++ < firstVisibleDesktopEntryIndex) {
-            continue;
+            return false;
         }
 
         entries.push_back(&entry);
-        if (entries.size() == maxVisibleDesktopEntries) {
-            break;
+        return entries.size() == maxVisibleDesktopEntries;
+    };
+
+    if (query.empty()) {
+        for (DesktopEntry* entry : orderedDesktopEntries()) {
+            if (appendIfVisible(*entry)) {
+                break;
+            }
+        }
+    } else {
+        for (auto& entry : desktopEntries) {
+            if (appendIfVisible(entry)) {
+                break;
+            }
         }
     }
 
     return entries;
+}
+
+std::vector<DesktopEntry*> App::orderedDesktopEntries()
+{
+    std::vector<DesktopEntry*> entries;
+    entries.reserve(desktopEntries.size());
+    for (auto& entry : desktopEntries) {
+        entries.push_back(&entry);
+    }
+
+    std::ranges::stable_sort(entries, [](const DesktopEntry* left, const DesktopEntry* right) {
+        if (left->pinned != right->pinned) {
+            return left->pinned;
+        }
+        if (left->pinned && left->pinOrder != right->pinOrder) {
+            return left->pinOrder < right->pinOrder;
+        }
+        return left->name < right->name;
+    });
+    return entries;
+}
+
+std::vector<const DesktopEntry*> App::orderedDesktopEntries() const
+{
+    std::vector<const DesktopEntry*> entries;
+    entries.reserve(desktopEntries.size());
+    for (const auto& entry : desktopEntries) {
+        entries.push_back(&entry);
+    }
+
+    std::ranges::stable_sort(entries, [](const DesktopEntry* left, const DesktopEntry* right) {
+        if (left->pinned != right->pinned) {
+            return left->pinned;
+        }
+        if (left->pinned && left->pinOrder != right->pinOrder) {
+            return left->pinOrder < right->pinOrder;
+        }
+        return left->name < right->name;
+    });
+    return entries;
+}
+
+DesktopEntry* App::selectedDesktopEntry()
+{
+    const std::string query = lowercase(textFieldValue);
+    size_t matchIndex = 0;
+
+    if (query.empty()) {
+        for (DesktopEntry* entry : orderedDesktopEntries()) {
+            if (matchIndex++ == selectedDesktopEntryIndex) {
+                return entry;
+            }
+        }
+    } else {
+        for (auto& entry : desktopEntries) {
+            if (entry.searchText.find(query) == std::string::npos) {
+                continue;
+            }
+            if (matchIndex++ == selectedDesktopEntryIndex) {
+                return &entry;
+            }
+        }
+    }
+
+    return nullptr;
 }
 
 size_t App::textIndexAtPointer(float x) const
@@ -2230,12 +2621,19 @@ void App::rebuildUi()
             }
 
             const float textX = iconRect.x + iconRect.width + desktopIconTextGap;
+            const float pinIconX = itemRect.x + itemRect.width - 8.0f - desktopPinIconSize;
+            const float textWidth = std::max(
+                entry.pinned
+                    ? itemRect.x + itemRect.width - textX - desktopPinIconSize - desktopPinTextGap - 8.0f
+                    : itemRect.x + itemRect.width - textX - 8.0f,
+                0.0f
+            );
             drawHighlightedText(
                 canvas,
                 {
                     textX,
                     itemRect.y,
-                    itemRect.x + itemRect.width - textX - 8.0f,
+                    textWidth,
                     itemRect.height,
                 },
                 entry.name,
@@ -2243,6 +2641,10 @@ void App::rebuildUi()
                 query,
                 desktopEntryText
             );
+            if (entry.pinned) {
+                const float pinIconY = itemRect.y + (itemRect.height - desktopPinIconSize) * 0.5f;
+                canvas.bitmap({pinIconX, pinIconY, desktopPinIconSize, desktopPinIconSize}, pinIconBitmap());
+            }
 
             y += listStyle.itemHeight + listStyle.itemGap;
         }
