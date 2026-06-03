@@ -91,6 +91,67 @@ std::string lowercase(std::string_view value)
     return lowered;
 }
 
+std::string searchAcronym(std::string_view value)
+{
+    std::string acronym;
+    bool tokenStart = true;
+    bool previousWasLowercase = false;
+
+    for (size_t i = 0; i < value.size(); ++i) {
+        const auto unsignedCharacter = static_cast<unsigned char>(value[i]);
+        if (std::isalnum(unsignedCharacter) == 0) {
+            tokenStart = true;
+            previousWasLowercase = false;
+            continue;
+        }
+
+        const bool uppercase = std::isupper(unsignedCharacter) != 0;
+        const bool lowercaseCharacter = std::islower(unsignedCharacter) != 0;
+        if (tokenStart || (uppercase && previousWasLowercase)) {
+            acronym.push_back(static_cast<char>(std::tolower(unsignedCharacter)));
+        }
+
+        tokenStart = false;
+        previousWasLowercase = lowercaseCharacter;
+    }
+
+    return acronym;
+}
+
+std::vector<size_t> searchAcronymSourceIndices(std::string_view value)
+{
+    std::vector<size_t> sourceIndices;
+    sourceIndices.reserve(value.size());
+    bool tokenStart = true;
+    bool previousWasLowercase = false;
+
+    for (size_t i = 0; i < value.size(); ++i) {
+        const auto unsignedCharacter = static_cast<unsigned char>(value[i]);
+        if (std::isalnum(unsignedCharacter) == 0) {
+            tokenStart = true;
+            previousWasLowercase = false;
+            continue;
+        }
+
+        const bool uppercase = std::isupper(unsignedCharacter) != 0;
+        const bool lowercaseCharacter = std::islower(unsignedCharacter) != 0;
+        if (tokenStart || (uppercase && previousWasLowercase)) {
+            sourceIndices.push_back(i);
+        }
+
+        tokenStart = false;
+        previousWasLowercase = lowercaseCharacter;
+    }
+
+    return sourceIndices;
+}
+
+bool desktopEntryMatchesQuery(const DesktopEntry& entry, std::string_view query)
+{
+    return entry.searchText.find(query) != std::string::npos ||
+        entry.searchAcronym.find(query) != std::string::npos;
+}
+
 bool parseBool(std::string_view value)
 {
     const std::string normalized = lowercase(trim(value));
@@ -109,8 +170,10 @@ void drawHighlightedText(
     if (!lowercaseQuery.empty()) {
         const float highlightHeight = std::min(bounds.height - 8.0f, style.size + 6.0f);
         const float highlightY = bounds.y + (bounds.height - highlightHeight) * 0.5f;
+        bool highlightedSubstring = false;
         size_t matchStart = lowercaseValue.find(lowercaseQuery);
         while (matchStart != std::string_view::npos) {
+            highlightedSubstring = true;
             const size_t matchEnd = matchStart + lowercaseQuery.size();
             const float highlightX = bounds.x + ui::textWidth(value, style, matchStart);
             const float highlightRight = bounds.x + ui::textWidth(value, style, matchEnd);
@@ -124,6 +187,28 @@ void drawHighlightedText(
             }
 
             matchStart = lowercaseValue.find(lowercaseQuery, matchEnd);
+        }
+
+        if (!highlightedSubstring) {
+            const std::string visibleAcronym = searchAcronym(value);
+            const size_t acronymMatchStart = visibleAcronym.find(lowercaseQuery);
+            if (acronymMatchStart != std::string::npos) {
+                const std::vector<size_t> sourceIndices = searchAcronymSourceIndices(value);
+                const size_t acronymMatchEnd = std::min(acronymMatchStart + lowercaseQuery.size(), sourceIndices.size());
+                for (size_t i = acronymMatchStart; i < acronymMatchEnd; ++i) {
+                    const size_t sourceIndex = sourceIndices[i];
+                    const float highlightX = bounds.x + ui::textWidth(value, style, sourceIndex);
+                    const float highlightRight = bounds.x + ui::textWidth(value, style, sourceIndex + 1);
+                    const float clippedHighlightX = std::max(highlightX, bounds.x);
+                    const float clippedHighlightRight = std::min(highlightRight, bounds.x + bounds.width);
+                    if (clippedHighlightRight > clippedHighlightX) {
+                        canvas.box(
+                            {clippedHighlightX, highlightY, clippedHighlightRight - clippedHighlightX, highlightHeight},
+                            {.fill = desktopEntryMatchHighlight, .borderWidth = 0.0f}
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -536,12 +621,17 @@ std::optional<DesktopEntry> parseDesktopEntry(const std::filesystem::path& path)
         return std::nullopt;
     }
 
+    std::string rawSearchText = name;
     std::string searchText = lowercase(name);
     if (!genericName.empty()) {
+        rawSearchText += ' ';
+        rawSearchText += genericName;
         searchText += ' ';
         searchText += lowercase(genericName);
     }
     if (!exec.empty()) {
+        rawSearchText += ' ';
+        rawSearchText += exec;
         searchText += ' ';
         searchText += lowercase(exec);
     }
@@ -552,6 +642,7 @@ std::optional<DesktopEntry> parseDesktopEntry(const std::filesystem::path& path)
         .execCommand = desktopExecCommand(exec),
         .workingDirectory = workingDirectory,
         .searchText = searchText,
+        .searchAcronym = searchAcronym(rawSearchText),
     };
 }
 
@@ -2437,7 +2528,7 @@ std::vector<const DesktopEntry*> App::filteredDesktopEntries() const
         }
     } else {
         for (const auto& entry : desktopEntries) {
-            if (entry.searchText.find(query) == std::string::npos) {
+            if (!desktopEntryMatchesQuery(entry, query)) {
                 continue;
             }
             entries.push_back(&entry);
@@ -2454,7 +2545,7 @@ std::vector<DesktopEntry*> App::visibleDesktopEntries()
     const std::string query = lowercase(textFieldValue);
     size_t matchIndex = 0;
     const auto appendIfVisible = [&](DesktopEntry& entry) {
-        if (!query.empty() && entry.searchText.find(query) == std::string::npos) {
+        if (!query.empty() && !desktopEntryMatchesQuery(entry, query)) {
             return false;
         }
 
@@ -2536,7 +2627,7 @@ DesktopEntry* App::selectedDesktopEntry()
         }
     } else {
         for (auto& entry : desktopEntries) {
-            if (entry.searchText.find(query) == std::string::npos) {
+            if (!desktopEntryMatchesQuery(entry, query)) {
                 continue;
             }
             if (matchIndex++ == selectedDesktopEntryIndex) {
