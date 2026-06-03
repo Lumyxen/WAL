@@ -3165,7 +3165,7 @@ void App::cutSelectionToClipboard()
 
 void App::pasteFromClipboard()
 {
-    FILE* pipe = popen("wl-paste -n", "r");
+    FILE* pipe = popen("wl-paste -n -t text", "r");
     if (pipe == nullptr) {
         return;
     }
@@ -3175,7 +3175,9 @@ void App::pasteFromClipboard()
     while (const size_t count = fread(buffer.data(), 1, buffer.size(), pipe)) {
         pasted.append(buffer.data(), count);
     }
-    pclose(pipe);
+    if (pclose(pipe) != 0) {
+        return;
+    }
     insertText(pasted);
 }
 
