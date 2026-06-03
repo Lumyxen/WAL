@@ -64,6 +64,10 @@ constexpr float desktopPinIconSize = 17.0f;
 constexpr float desktopPinTextGap = 10.0f;
 const ui::TextStyle desktopEntryText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 15.0f};
 const ui::Color desktopEntryMatchHighlight = ui::Color::srgb(0x3c, 0x48, 0x41);
+constexpr float multiLaunchMarkerSize = 16.0f;
+constexpr float multiLaunchMarkerTextGap = 10.0f;
+const ui::Color multiLaunchMarkerBorder = ui::Color::srgb(0xa7, 0xc0, 0x80);
+const ui::Color multiLaunchMarkerFill = ui::Color::srgb(0xa7, 0xc0, 0x80, 0.85f);
 constexpr double desktopEntryRankingHalfLifeSeconds = 14.0 * 24.0 * 60.0 * 60.0;
 constexpr double desktopEntryRankingEpsilon = 0.0001;
 constexpr std::string_view pinIconSvg =
@@ -940,7 +944,11 @@ void App::pointerButton(void* data, wl_pointer*, uint32_t, uint32_t time, uint32
             app->lastClickTime = time;
             app->refreshUi();
             if (doubleClick) {
-                app->launchSelectedDesktopEntry();
+                if (app->multiLaunchMode) {
+                    app->toggleSelectedDesktopEntryMultiLaunch();
+                } else {
+                    app->launchSelectedDesktopEntry();
+                }
             }
         }
     } else {
@@ -2162,6 +2170,18 @@ bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
                 toggleSelectedDesktopEntryPin();
             }
             return false;
+        case XKB_KEY_o:
+        case XKB_KEY_O:
+            if (allowSingleShotShortcuts) {
+                toggleMultiLaunchMode();
+            }
+            return false;
+        case XKB_KEY_Return:
+        case XKB_KEY_KP_Enter:
+            if (allowSingleShotShortcuts) {
+                launchMultiSelectedDesktopEntries();
+            }
+            return false;
         case XKB_KEY_Left:
             moveCursorByWord(false, shift);
             return true;
@@ -2215,7 +2235,11 @@ bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
     case XKB_KEY_Return:
     case XKB_KEY_KP_Enter:
         if (allowSingleShotShortcuts) {
-            launchSelectedDesktopEntry();
+            if (multiLaunchMode) {
+                toggleSelectedDesktopEntryMultiLaunch();
+            } else {
+                launchSelectedDesktopEntry();
+            }
         }
         return false;
     case XKB_KEY_Left:
@@ -2512,6 +2536,56 @@ void App::moveSelectedDesktopEntryPin(int delta)
     refreshUi();
 }
 
+void App::toggleMultiLaunchMode()
+{
+    multiLaunchMode = !multiLaunchMode;
+    if (!multiLaunchMode) {
+        multiLaunchEntries.clear();
+    }
+    refreshUi();
+}
+
+void App::toggleSelectedDesktopEntryMultiLaunch()
+{
+    if (!multiLaunchMode) {
+        return;
+    }
+
+    DesktopEntry* entry = selectedDesktopEntry();
+    if (entry == nullptr) {
+        return;
+    }
+
+    const auto selected = std::ranges::find(multiLaunchEntries, entry);
+    if (selected == multiLaunchEntries.end()) {
+        multiLaunchEntries.push_back(entry);
+    } else {
+        multiLaunchEntries.erase(selected);
+    }
+    refreshUi();
+}
+
+void App::launchMultiSelectedDesktopEntries()
+{
+    if (!multiLaunchMode || multiLaunchEntries.empty()) {
+        return;
+    }
+
+    bool launched = false;
+    for (DesktopEntry* entry : multiLaunchEntries) {
+        if (entry == nullptr || entry->execCommand.empty()) {
+            continue;
+        }
+
+        launchDesktopEntry(*entry, false);
+        launched = true;
+    }
+
+    if (launched) {
+        running = false;
+    }
+}
+
 void App::launchSelectedDesktopEntry()
 {
     DesktopEntry* entry = selectedDesktopEntry();
@@ -2520,6 +2594,11 @@ void App::launchSelectedDesktopEntry()
     }
 
     launchDesktopEntry(*entry);
+}
+
+bool App::isMultiLaunchEntrySelected(const DesktopEntry* entry) const
+{
+    return std::ranges::find(multiLaunchEntries, entry) != multiLaunchEntries.end();
 }
 
 void App::selectDesktopEntry(const DesktopEntry* entry)
@@ -2539,7 +2618,7 @@ void App::selectDesktopEntry(const DesktopEntry* entry)
     clampDesktopNavigation();
 }
 
-void App::launchDesktopEntry(DesktopEntry& entry)
+void App::launchDesktopEntry(DesktopEntry& entry, bool closeAfterLaunch)
 {
     if (entry.execCommand.empty()) {
         return;
@@ -2563,7 +2642,9 @@ void App::launchDesktopEntry(DesktopEntry& entry)
 
     if (pid > 0) {
         recordDesktopEntryLaunch(entry);
-        running = false;
+        if (closeAfterLaunch) {
+            running = false;
+        }
     }
 }
 
@@ -2869,8 +2950,22 @@ void App::rebuildUi()
                 canvas.box(itemRect, {.fill = listStyle.selectedFill, .borderWidth = 0.0f});
             }
 
+            float contentX = itemRect.x + 8.0f;
+            if (multiLaunchMode) {
+                const float markerY = itemRect.y + (itemRect.height - multiLaunchMarkerSize) * 0.5f;
+                const ui::Rect markerRect{contentX, markerY, multiLaunchMarkerSize, multiLaunchMarkerSize};
+                canvas.box(markerRect, {.fill = transparent, .border = multiLaunchMarkerBorder, .borderWidth = 1.0f});
+                if (isMultiLaunchEntrySelected(&entry)) {
+                    canvas.box(
+                        {markerRect.x + 4.0f, markerRect.y + 4.0f, markerRect.width - 8.0f, markerRect.height - 8.0f},
+                        {.fill = multiLaunchMarkerFill, .borderWidth = 0.0f}
+                    );
+                }
+                contentX += multiLaunchMarkerSize + multiLaunchMarkerTextGap;
+            }
+
             const float iconY = itemRect.y + (itemRect.height - desktopIconSize) * 0.5f;
-            const ui::Rect iconRect{itemRect.x + 8.0f, iconY, desktopIconSize, desktopIconSize};
+            const ui::Rect iconRect{contentX, iconY, desktopIconSize, desktopIconSize};
             if (!entry.icon.pixels.empty()) {
                 canvas.bitmap(iconRect, entry.icon);
             }

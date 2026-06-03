@@ -79,6 +79,8 @@ private:
     std::vector<DesktopEntry> desktopEntries;
     size_t selectedDesktopEntryIndex = 0;
     size_t firstVisibleDesktopEntryIndex = 0;
+    bool multiLaunchMode = false;
+    std::vector<DesktopEntry*> multiLaunchEntries;
     size_t lastClickedDesktopEntryIndex = std::numeric_limits<size_t>::max();
     uint32_t lastClickTime = 0;
     float pointerX = 0.0f;
@@ -226,9 +228,13 @@ private:
     void moveDesktopSelection(int delta);
     void toggleSelectedDesktopEntryPin();
     void moveSelectedDesktopEntryPin(int delta);
+    void toggleMultiLaunchMode();
+    void toggleSelectedDesktopEntryMultiLaunch();
+    void launchMultiSelectedDesktopEntries();
     void launchSelectedDesktopEntry();
-    void launchDesktopEntry(DesktopEntry& entry);
+    void launchDesktopEntry(DesktopEntry& entry, bool closeAfterLaunch = true);
     void selectDesktopEntry(const DesktopEntry* entry);
+    [[nodiscard]] bool isMultiLaunchEntrySelected(const DesktopEntry* entry) const;
 
     [[nodiscard]] ui::Rect textFieldRect() const;
     [[nodiscard]] ui::Rect desktopListRect() const;
