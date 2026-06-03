@@ -45,6 +45,13 @@ constexpr std::array<float, 4> backgroundTint = {
     0.019382f,
     0.72f,
 };
+constexpr std::chrono::milliseconds backgroundTintFadeDuration{175};
+constexpr std::chrono::milliseconds mainMenuFadeDuration{150};
+constexpr std::chrono::milliseconds mainMenuSlideDuration{225};
+constexpr std::chrono::milliseconds listPopulationDuration{225};
+constexpr std::chrono::milliseconds listEntryFadeDuration{70};
+constexpr float mainMenuAnimationOffsetPixels = 14.0f;
+constexpr int animationFrameTimeoutMilliseconds = 1;
 
 const ui::Color panelFill = ui::Color::srgb(0x27, 0x2e, 0x33);
 const ui::Color panelBorder = ui::Color::srgb(0x4f, 0x5b, 0x58);
@@ -1318,6 +1325,9 @@ void App::initVulkan()
     createGraphicsPipeline();
     createFramebuffers();
     createCommandPool();
+    const auto animationStart = std::chrono::steady_clock::now();
+    backgroundTintFadeStart = animationStart;
+    mainMenuAnimationStart = animationStart;
     createUiVertexBuffer();
     createCommandBuffers();
     createSyncObjects();
@@ -1327,11 +1337,13 @@ void App::mainLoop()
 {
     bool needsFrame = true;
     while (running) {
-        if (needsFrame || uiDirty) {
+        if (needsFrame || uiDirty || backgroundTintFadeActive() || mainMenuAnimationActive()) {
             drawFrame();
             needsFrame = false;
         }
-        dispatchWaylandEvents();
+        dispatchWaylandEvents(
+            backgroundTintFadeActive() || mainMenuAnimationActive() ? animationFrameTimeoutMilliseconds : -1
+        );
     }
 
     vkDeviceWaitIdle(device);
@@ -1811,6 +1823,70 @@ void App::createSyncObjects()
     }
 }
 
+float App::backgroundTintFadeProgress() const
+{
+    const auto elapsed = std::chrono::steady_clock::now() - backgroundTintFadeStart;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto durationSeconds = std::chrono::duration<float>(backgroundTintFadeDuration).count();
+    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    return progress * progress * (3.0f - 2.0f * progress);
+}
+
+bool App::backgroundTintFadeActive() const
+{
+    return std::chrono::steady_clock::now() - backgroundTintFadeStart <
+           backgroundTintFadeDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+}
+
+float App::mainMenuFadeProgress() const
+{
+    const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto durationSeconds = std::chrono::duration<float>(mainMenuFadeDuration).count();
+    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    return progress * progress * (3.0f - 2.0f * progress);
+}
+
+float App::mainMenuSlideProgress() const
+{
+    const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto durationSeconds = std::chrono::duration<float>(mainMenuSlideDuration).count();
+    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    return progress * progress * (3.0f - 2.0f * progress);
+}
+
+float App::listPopulationProgress() const
+{
+    const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto durationSeconds = std::chrono::duration<float>(listPopulationDuration).count();
+    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    return progress * progress * (3.0f - 2.0f * progress);
+}
+
+float App::listEntryPopulationProgress(size_t entryIndex) const
+{
+    if (entryIndex >= maxVisibleDesktopEntries) {
+        return 1.0f;
+    }
+
+    const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto fadeSeconds = std::chrono::duration<float>(listEntryFadeDuration).count();
+    const auto totalSeconds = std::chrono::duration<float>(listPopulationDuration).count();
+    const float staggerSeconds = (totalSeconds - fadeSeconds) / static_cast<float>(maxVisibleDesktopEntries - 1);
+    const float entryStartSeconds = static_cast<float>(entryIndex) * staggerSeconds;
+    const float progress = std::clamp((elapsedSeconds - entryStartSeconds) / fadeSeconds, 0.0f, 1.0f);
+    return progress * progress * (3.0f - 2.0f * progress);
+}
+
+bool App::mainMenuAnimationActive() const
+{
+    return std::chrono::steady_clock::now() - mainMenuAnimationStart <
+           mainMenuSlideDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+}
+
 void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, size_t frameIndex)
 {
     VkCommandBufferBeginInfo beginInfo{};
@@ -1820,7 +1896,15 @@ void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex
         throw std::runtime_error("failed to begin command buffer");
     }
 
-    VkClearValue clearColor = {{{backgroundTint[0], backgroundTint[1], backgroundTint[2], backgroundTint[3]}}};
+    const float fadeProgress = backgroundTintFadeProgress();
+    VkClearValue clearColor = {{
+        {
+            backgroundTint[0] * fadeProgress,
+            backgroundTint[1] * fadeProgress,
+            backgroundTint[2] * fadeProgress,
+            backgroundTint[3] * fadeProgress,
+        }
+    }};
 
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1861,7 +1945,7 @@ void App::drawFrame()
     }
 
     const bool wasUiDirty = uiDirty;
-    if (uiDirty) {
+    if (uiDirty || mainMenuAnimationActive()) {
         rebuildUi();
         uiDirty = false;
     }
@@ -2911,8 +2995,14 @@ void App::rebuildUi()
 
     const std::vector<DesktopEntry*> visibleEntries = visibleDesktopEntries();
     const ui::Rect panel = panelRect(visibleEntries.size());
+    ui::Rect renderedPanel = panel;
+    if (!visibleEntries.empty()) {
+        const ui::Rect collapsedPanel = panelRect(0);
+        const float listProgress = listPopulationProgress();
+        renderedPanel.height = collapsedPanel.height + (panel.height - collapsedPanel.height) * listProgress;
+    }
 
-    canvas.box(panel, {.fill = panelFill, .border = panelBorder, .borderWidth = 1.0f});
+    canvas.box(renderedPanel, {.fill = panelFill, .border = panelBorder, .borderWidth = 1.0f});
 
     const ui::Rect textField = textFieldRect();
     canvas.textField(
@@ -2929,11 +3019,19 @@ void App::rebuildUi()
         textFieldPlaceholder
     );
 
+    struct VertexOpacityRange {
+        size_t begin = 0;
+        size_t end = 0;
+        float opacity = 1.0f;
+    };
+    std::vector<VertexOpacityRange> listEntryOpacityRanges;
+
     if (!visibleEntries.empty()) {
         const ui::ListStyle listStyle = desktopListStyle();
         const ui::Rect listRect = desktopListRect();
         float y = listRect.y + listStyle.padding;
         for (size_t i = 0; i < visibleEntries.size(); ++i) {
+            const size_t entryVertexBegin = canvas.vertexCount();
             DesktopEntry& entry = *visibleEntries[i];
             if (!entry.iconLoaded) {
                 entry.icon = loadIconBitmap(entry.iconName);
@@ -2997,11 +3095,45 @@ void App::rebuildUi()
             }
 
             y += listStyle.itemHeight + listStyle.itemGap;
+            const size_t entryVertexEnd = canvas.vertexCount();
+            const float entryOpacity = listEntryPopulationProgress(i);
+            if (entryOpacity < 1.0f) {
+                listEntryOpacityRanges.push_back({
+                    .begin = entryVertexBegin,
+                    .end = entryVertexEnd,
+                    .opacity = entryOpacity,
+                });
+            }
         }
     }
 
     const auto vertices = canvas.vertices();
     uiVertices.assign(vertices.begin(), vertices.end());
+
+    for (const VertexOpacityRange& range : listEntryOpacityRanges) {
+        const size_t end = std::min(range.end, uiVertices.size());
+        for (size_t index = range.begin; index < end; ++index) {
+            uiVertices[index].color.r *= range.opacity;
+            uiVertices[index].color.g *= range.opacity;
+            uiVertices[index].color.b *= range.opacity;
+            uiVertices[index].color.a *= range.opacity;
+        }
+    }
+
+    const float fadeProgress = mainMenuFadeProgress();
+    const float slideProgress = mainMenuSlideProgress();
+    if (fadeProgress < 1.0f || slideProgress < 1.0f) {
+        const float opacity = fadeProgress * fadeProgress;
+        const float yOffset = (1.0f - slideProgress) * mainMenuAnimationOffsetPixels * 2.0f /
+                              std::max(static_cast<float>(swapchainExtent.height), 1.0f);
+        for (ui::Vertex& vertex : uiVertices) {
+            vertex.position.y += yOffset;
+            vertex.color.r *= opacity;
+            vertex.color.g *= opacity;
+            vertex.color.b *= opacity;
+            vertex.color.a *= opacity;
+        }
+    }
 }
 
 VkShaderModule App::createShaderModule(const std::vector<char>& code)
@@ -3204,7 +3336,7 @@ void App::createBuffer(
     vkBindBufferMemory(device, buffer, bufferMemory, 0);
 }
 
-void App::dispatchWaylandEvents()
+void App::dispatchWaylandEvents(int timeoutMilliseconds)
 {
     handleKeyboardRepeat();
 
@@ -3235,7 +3367,7 @@ void App::dispatchWaylandEvents()
         pollCount = 2;
     }
 
-    const int pollResult = poll(polls.data(), pollCount, uiDirty ? 0 : -1);
+    const int pollResult = poll(polls.data(), pollCount, uiDirty ? 0 : timeoutMilliseconds);
     if (pollResult <= 0) {
         wl_display_cancel_read(display);
         return;

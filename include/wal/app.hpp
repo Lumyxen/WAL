@@ -90,6 +90,8 @@ private:
     std::chrono::milliseconds keyboardRepeatDelay{600};
     int keyboardRepeatTimerFd = -1;
     std::optional<uint32_t> repeatingKey;
+    std::chrono::steady_clock::time_point backgroundTintFadeStart;
+    std::chrono::steady_clock::time_point mainMenuAnimationStart;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -250,6 +252,13 @@ private:
     [[nodiscard]] size_t textSelectionStart() const;
     [[nodiscard]] size_t textSelectionEnd() const;
     [[nodiscard]] size_t textIndexAtPointer(float x) const;
+    [[nodiscard]] float backgroundTintFadeProgress() const;
+    [[nodiscard]] bool backgroundTintFadeActive() const;
+    [[nodiscard]] float mainMenuFadeProgress() const;
+    [[nodiscard]] float mainMenuSlideProgress() const;
+    [[nodiscard]] float listPopulationProgress() const;
+    [[nodiscard]] float listEntryPopulationProgress(size_t entryIndex) const;
+    [[nodiscard]] bool mainMenuAnimationActive() const;
 
     [[nodiscard]] VkShaderModule createShaderModule(const std::vector<char>& code);
     [[nodiscard]] bool isDeviceSuitable(VkPhysicalDevice candidate);
@@ -268,7 +277,7 @@ private:
         VkBuffer& buffer,
         VkDeviceMemory& bufferMemory
     );
-    void dispatchWaylandEvents();
+    void dispatchWaylandEvents(int timeoutMilliseconds);
 };
 
 } // namespace wal

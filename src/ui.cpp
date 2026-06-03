@@ -414,6 +414,11 @@ std::span<const Vertex> Canvas::vertices() const
     return vertices_;
 }
 
+size_t Canvas::vertexCount() const
+{
+    return vertices_.size();
+}
+
 Vec2 Canvas::toClipSpace(Vec2 point) const
 {
     return {

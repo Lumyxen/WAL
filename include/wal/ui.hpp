@@ -113,6 +113,7 @@ public:
     void list(Rect rect, std::span<const std::string_view> items, uint32_t selectedIndex, ListStyle style = {});
 
     [[nodiscard]] std::span<const Vertex> vertices() const;
+    [[nodiscard]] size_t vertexCount() const;
 
 private:
     float width_ = 1.0f;
