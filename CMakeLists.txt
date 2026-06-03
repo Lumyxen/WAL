@@ -16,6 +16,7 @@ pkg_check_modules(LIBRSVG REQUIRED IMPORTED_TARGET librsvg-2.0)
 
 add_executable(wal
     src/app.cpp
+    src/config.cpp
     src/io.cpp
     src/layer_shell.cpp
     src/main.cpp

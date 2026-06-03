@@ -40,47 +40,46 @@ const std::vector<const char*> deviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
-constexpr std::array<float, 4> backgroundTint = {
-    0.012983f,
-    0.016807f,
-    0.019382f,
-    0.72f,
+const std::array<float, 4> backgroundTint = {
+    config().colours.background_tint[0],
+    config().colours.background_tint[1],
+    config().colours.background_tint[2],
+    config().window.background_tint,
 };
-constexpr std::chrono::milliseconds backgroundTintFadeDuration{175};
-constexpr std::chrono::milliseconds closeFadeOutDuration{100};
-constexpr std::chrono::milliseconds mainMenuFadeDuration{150};
-constexpr std::chrono::milliseconds mainMenuSlideDuration{225};
-constexpr std::chrono::milliseconds listPopulationDuration{225};
-constexpr std::chrono::milliseconds listScrollDuration{150};
-constexpr std::chrono::milliseconds selectionHighlightSlideDuration{75};
-constexpr std::chrono::milliseconds multiLaunchModeSlideDuration{150};
-constexpr float listEdgeFadeDistance = 5.0f;
-constexpr float mainMenuAnimationOffsetPixels = 14.0f;
-constexpr int animationFrameTimeoutMilliseconds = 1;
+const std::chrono::milliseconds backgroundTintFadeDuration = config().animation.background_tint_duration;
+const std::chrono::milliseconds closeFadeOutDuration = config().animation.close_duration;
+const std::chrono::milliseconds mainMenuFadeDuration = config().animation.open_fade_duration;
+const std::chrono::milliseconds mainMenuSlideDuration = config().animation.open_slide_duration;
+const std::chrono::milliseconds listPopulationDuration = config().animation.list_duration;
+const std::chrono::milliseconds listScrollDuration = config().animation.scroll_duration;
+const std::chrono::milliseconds selectionHighlightSlideDuration = config().animation.selection_duration;
+const std::chrono::milliseconds multiLaunchModeSlideDuration = config().animation.multi_launch_duration;
+const float listEdgeFadeDistance = config().layout.list_edge_fade_distance;
+const float mainMenuAnimationOffsetPixels = config().animation.open_offset_px;
+const std::chrono::milliseconds animationFrameTimeout = config().animation.frame_timeout;
 
-const ui::Color panelFill = ui::Color::srgb(0x27, 0x2e, 0x33);
-const ui::Color panelBorder = ui::Color::srgb(0x4f, 0x5b, 0x58);
-const ui::Color textFieldFill = ui::Color::srgb(0x2e, 0x38, 0x3c);
-const ui::Color transparent = ui::Color::srgb(0x27, 0x2e, 0x33, 0.0f);
-constexpr std::string_view textFieldPlaceholder = "Search";
-const ui::TextStyle textFieldPlaceholderStyle{.color = ui::Color::srgb(0x86, 0x8d, 0x80), .size = 16.0f};
-const ui::TextStyle textFieldText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 16.0f};
-constexpr float panelPadding = 18.0f;
-constexpr float textFieldHeight = 37.0f;
-constexpr float textFieldHorizontalTextInset = 8.0f;
-constexpr size_t maxVisibleDesktopEntries = 8;
-constexpr float listTopGap = 12.0f;
-constexpr float desktopIconSize = 30.0f;
-constexpr float desktopIconTextGap = 12.0f;
-constexpr float desktopPinIconSize = 17.0f;
-constexpr float desktopPinTextGap = 10.0f;
-const ui::TextStyle desktopEntryText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 15.0f};
-const ui::Color desktopEntryMatchHighlight = ui::Color::srgb(0x3c, 0x48, 0x41);
-constexpr float multiLaunchMarkerSize = 16.0f;
-constexpr float multiLaunchMarkerTextGap = 10.0f;
-constexpr float multiLaunchMarkerSlideOffset = 8.0f;
-const ui::Color multiLaunchMarkerBorder = ui::Color::srgb(0xa7, 0xc0, 0x80);
-const ui::Color multiLaunchMarkerFill = ui::Color::srgb(0xa7, 0xc0, 0x80, 0.85f);
+const ui::Color panelFill = config().colours.panel_fill;
+const ui::Color panelBorder = config().colours.panel_border;
+const ui::Color textFieldFill = config().colours.text_field_fill;
+const ui::Color transparent = ui::Color{panelFill.r, panelFill.g, panelFill.b, 0.0f};
+const ui::TextStyle textFieldPlaceholderStyle{.color = config().colours.placeholder, .size = config().text.text_field_size};
+const ui::TextStyle textFieldText{.color = config().colours.text, .size = config().text.text_field_size};
+const float panelPadding = config().layout.panel_padding;
+const float textFieldHeight = config().layout.text_field_height;
+const float textFieldHorizontalTextInset = config().layout.text_field_horizontal_inset;
+const size_t maxVisibleDesktopEntries = config().layout.max_visible_entries;
+const float listTopGap = config().layout.list_top_gap;
+const float desktopIconSize = config().layout.desktop_icon_size;
+const float desktopIconTextGap = config().layout.desktop_icon_text_gap;
+const float desktopPinIconSize = config().layout.pin_icon_size;
+const float desktopPinTextGap = config().layout.pin_icon_text_gap;
+const ui::TextStyle desktopEntryText{.color = config().colours.text, .size = config().text.entry_size};
+const ui::Color desktopEntryMatchHighlight = config().colours.match_highlight;
+const float multiLaunchMarkerSize = config().layout.multi_launch_marker_size;
+const float multiLaunchMarkerTextGap = config().layout.multi_launch_marker_text_gap;
+const float multiLaunchMarkerSlideOffset = config().layout.multi_launch_marker_slide_offset;
+const ui::Color multiLaunchMarkerBorder = config().colours.multi_launch_border;
+const ui::Color multiLaunchMarkerFill = config().colours.multi_launch_fill;
 constexpr double desktopEntryRankingHalfLifeSeconds = 14.0 * 24.0 * 60.0 * 60.0;
 constexpr double desktopEntryRankingEpsilon = 0.0001;
 constexpr std::string_view pinIconSvg =
@@ -118,6 +117,39 @@ ui::Color colorWithOpacity(ui::Color color, float opacity)
     color.b *= opacity;
     color.a *= opacity;
     return color;
+}
+
+float linearToSrgb(float channel)
+{
+    channel = std::clamp(channel, 0.0f, 1.0f);
+    if (channel <= 0.0031308f) {
+        return channel * 12.92f;
+    }
+    return 1.055f * std::pow(channel, 1.0f / 2.4f) - 0.055f;
+}
+
+float animationProgress(std::chrono::steady_clock::time_point start, std::chrono::milliseconds duration)
+{
+    if (!config().animation.enabled || duration <= std::chrono::milliseconds{0}) {
+        return 1.0f;
+    }
+
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto durationSeconds = std::chrono::duration<float>(duration).count();
+    return std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+}
+
+float smoothAnimationProgress(std::chrono::steady_clock::time_point start, std::chrono::milliseconds duration)
+{
+    const float progress = animationProgress(start, duration);
+    return progress * progress * (3.0f - 2.0f * progress);
+}
+
+bool animationActive(std::chrono::steady_clock::time_point start, std::chrono::milliseconds duration)
+{
+    return config().animation.enabled && duration > std::chrono::milliseconds{0} &&
+           std::chrono::steady_clock::now() - start < duration + animationFrameTimeout;
 }
 
 std::string searchAcronym(std::string_view value)
@@ -301,10 +333,10 @@ ui::ListStyle desktopListStyle()
     return {
         .container = {.fill = transparent, .borderWidth = 0.0f},
         .item = {.fill = transparent, .borderWidth = 0.0f},
-        .selectedFill = ui::Color::srgb(0x41, 0x4b, 0x50, 0.95f),
-        .padding = 0.0f,
-        .itemHeight = 42.0f,
-        .itemGap = 3.0f,
+        .selectedFill = config().colours.selected_fill,
+        .padding = config().layout.list_padding,
+        .itemHeight = config().layout.list_item_height,
+        .itemGap = config().layout.list_item_gap,
     };
 }
 
@@ -528,7 +560,14 @@ ui::Bitmap drawDefaultDesktopIconBitmap()
     constexpr double sourceSize = 24.0;
     const double scale = static_cast<double>(desktopIconSize) / sourceSize;
     cairo_scale(cairo, scale, scale);
-    cairo_set_source_rgba(cairo, 0xd3 / 255.0, 0xc6 / 255.0, 0xaa / 255.0, 1.0);
+    const ui::Color iconColor = config().colours.icon;
+    cairo_set_source_rgba(
+        cairo,
+        linearToSrgb(iconColor.r),
+        linearToSrgb(iconColor.g),
+        linearToSrgb(iconColor.b),
+        iconColor.a
+    );
     cairo_set_line_width(cairo, 2.0);
     cairo_set_line_cap(cairo, CAIRO_LINE_CAP_ROUND);
     cairo_set_line_join(cairo, CAIRO_LINE_JOIN_ROUND);
@@ -749,10 +788,10 @@ ui::Bitmap sdfBitmapFromAlphaMask(
 const ui::Bitmap& pinIconBitmap()
 {
     static const ui::Bitmap bitmap = [] {
-        constexpr uint32_t outputSize = static_cast<uint32_t>(desktopPinIconSize);
+        const uint32_t outputSize = static_cast<uint32_t>(desktopPinIconSize);
         constexpr uint32_t sourceScale = 8;
         const std::vector<float> alphaMask = renderSvgAlphaMask(pinIconSvg, outputSize * sourceScale);
-        return sdfBitmapFromAlphaMask(alphaMask, outputSize * sourceScale, outputSize, desktopEntryText.color);
+        return sdfBitmapFromAlphaMask(alphaMask, outputSize * sourceScale, outputSize, config().colours.pin_icon);
     }();
     return bitmap;
 }
@@ -2054,17 +2093,12 @@ void App::createSyncObjects()
 
 float App::backgroundTintFadeProgress() const
 {
-    const auto elapsed = std::chrono::steady_clock::now() - backgroundTintFadeStart;
-    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto durationSeconds = std::chrono::duration<float>(backgroundTintFadeDuration).count();
-    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
-    return progress * progress * (3.0f - 2.0f * progress);
+    return smoothAnimationProgress(backgroundTintFadeStart, backgroundTintFadeDuration);
 }
 
 bool App::backgroundTintFadeActive() const
 {
-    return std::chrono::steady_clock::now() - backgroundTintFadeStart <
-           backgroundTintFadeDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+    return animationActive(backgroundTintFadeStart, backgroundTintFadeDuration);
 }
 
 float App::closeFadeOutProgress() const
@@ -2073,10 +2107,7 @@ float App::closeFadeOutProgress() const
         return 0.0f;
     }
 
-    const auto elapsed = std::chrono::steady_clock::now() - closeFadeOutStart;
-    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto durationSeconds = std::chrono::duration<float>(closeFadeOutDuration).count();
-    return std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    return animationProgress(closeFadeOutStart, closeFadeOutDuration);
 }
 
 float App::closeFadeOutOpacity() const
@@ -2086,41 +2117,27 @@ float App::closeFadeOutOpacity() const
 
 bool App::closeFadeOutActive() const
 {
-    return closing && std::chrono::steady_clock::now() - closeFadeOutStart <
-           closeFadeOutDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+    return closing && animationActive(closeFadeOutStart, closeFadeOutDuration);
 }
 
 float App::mainMenuFadeProgress() const
 {
-    const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
-    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto durationSeconds = std::chrono::duration<float>(mainMenuFadeDuration).count();
-    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
-    return progress * progress * (3.0f - 2.0f * progress);
+    return smoothAnimationProgress(mainMenuAnimationStart, mainMenuFadeDuration);
 }
 
 float App::mainMenuSlideProgress() const
 {
-    const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
-    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto durationSeconds = std::chrono::duration<float>(mainMenuSlideDuration).count();
-    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
-    return progress * progress * (3.0f - 2.0f * progress);
+    return smoothAnimationProgress(mainMenuAnimationStart, mainMenuSlideDuration);
 }
 
 float App::listPopulationProgress() const
 {
-    const auto elapsed = std::chrono::steady_clock::now() - listAnimationStart;
-    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto durationSeconds = std::chrono::duration<float>(listPopulationDuration).count();
-    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
-    return progress * progress * (3.0f - 2.0f * progress);
+    return smoothAnimationProgress(listAnimationStart, listPopulationDuration);
 }
 
 bool App::listPopulationAnimationActive() const
 {
-    return std::chrono::steady_clock::now() - listAnimationStart <
-           listPopulationDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+    return animationActive(listAnimationStart, listPopulationDuration);
 }
 
 float App::animatedVisibleListCount() const
@@ -2145,18 +2162,14 @@ float App::animatedPanelHeight() const
 
 float App::listScrollProgress() const
 {
-    const auto elapsed = std::chrono::steady_clock::now() - listScrollAnimationStart;
-    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto durationSeconds = std::chrono::duration<float>(listScrollDuration).count();
-    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    const float progress = animationProgress(listScrollAnimationStart, listScrollDuration);
     const float remaining = 1.0f - progress;
     return 1.0f - remaining * remaining * remaining;
 }
 
 bool App::listScrollAnimationActive() const
 {
-    return std::chrono::steady_clock::now() - listScrollAnimationStart <
-           listScrollDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+    return animationActive(listScrollAnimationStart, listScrollDuration);
 }
 
 float App::animatedListScrollOffset() const
@@ -2166,17 +2179,12 @@ float App::animatedListScrollOffset() const
 
 float App::selectionHighlightProgress() const
 {
-    const auto elapsed = std::chrono::steady_clock::now() - selectionHighlightAnimationStart;
-    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto durationSeconds = std::chrono::duration<float>(selectionHighlightSlideDuration).count();
-    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
-    return progress * progress * (3.0f - 2.0f * progress);
+    return smoothAnimationProgress(selectionHighlightAnimationStart, selectionHighlightSlideDuration);
 }
 
 bool App::selectionHighlightAnimationActive() const
 {
-    return std::chrono::steady_clock::now() - selectionHighlightAnimationStart <
-           selectionHighlightSlideDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+    return animationActive(selectionHighlightAnimationStart, selectionHighlightSlideDuration);
 }
 
 float App::animatedSelectionHighlightY() const
@@ -2193,10 +2201,7 @@ float App::multiLaunchModeProgress() const
         return targetProgress;
     }
 
-    const auto elapsed = std::chrono::steady_clock::now() - multiLaunchModeAnimationStart;
-    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto durationSeconds = std::chrono::duration<float>(multiLaunchModeSlideDuration).count();
-    const float rawProgress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    const float rawProgress = animationProgress(multiLaunchModeAnimationStart, multiLaunchModeSlideDuration);
     const float easedProgress = rawProgress * rawProgress * (3.0f - 2.0f * rawProgress);
     return multiLaunchModeAnimationStartProgress +
            (targetProgress - multiLaunchModeAnimationStartProgress) * easedProgress;
@@ -2204,14 +2209,12 @@ float App::multiLaunchModeProgress() const
 
 bool App::multiLaunchModeAnimationActive() const
 {
-    return std::chrono::steady_clock::now() - multiLaunchModeAnimationStart <
-           multiLaunchModeSlideDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+    return animationActive(multiLaunchModeAnimationStart, multiLaunchModeSlideDuration);
 }
 
 bool App::mainMenuAnimationActive() const
 {
-    return std::chrono::steady_clock::now() - mainMenuAnimationStart <
-           mainMenuSlideDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+    return animationActive(mainMenuAnimationStart, mainMenuSlideDuration);
 }
 
 bool App::uiAnimationActive() const
@@ -3160,7 +3163,7 @@ ui::Rect App::panelRect(size_t visibleResultCount) const
               static_cast<float>(cappedResultCount - 1) * listStyle.itemGap;
     const float panelHeight =
         panelPadding * 2.0f + textFieldHeight + (cappedResultCount == 0 ? 0.0f : listTopGap + listHeight);
-    const float panelWidth = static_cast<float>(swapchainExtent.width) * 0.4f;
+    const float panelWidth = static_cast<float>(swapchainExtent.width) * config().layout.panel_width_fraction;
 
     return {
         (static_cast<float>(swapchainExtent.width) - panelWidth) * 0.5f,
@@ -3423,10 +3426,12 @@ void App::rebuildUi()
             .box = {.fill = textFieldFill, .borderWidth = 0.0f},
             .placeholder = textFieldPlaceholderStyle,
             .text = textFieldText,
+            .selection = config().colours.text_selection,
+            .cursor = config().colours.cursor,
         },
         textCursorIndex,
         textSelectionAnchor,
-        textFieldPlaceholder
+        config().text.placeholder
     );
 
     struct VertexOpacityRange {
@@ -3471,9 +3476,10 @@ void App::rebuildUi()
     const auto listEdgeOpacity = [&](float y) {
         const float listTop = listY + listStyle.padding;
         const float listBottom = renderedPanel.y + renderedPanel.height - panelPadding - listStyle.padding;
-        const float topOpacity = smoothStep((y - (listTop - listEdgeFadeDistance)) / listEdgeFadeDistance);
+        const float edgeFadeDistance = std::max(listEdgeFadeDistance, 1.0f);
+        const float topOpacity = smoothStep((y - (listTop - edgeFadeDistance)) / edgeFadeDistance);
         const float bottomOpacity = smoothStep(
-            (listBottom + listEdgeFadeDistance - y - listStyle.itemHeight) / listEdgeFadeDistance
+            (listBottom + edgeFadeDistance - y - listStyle.itemHeight) / edgeFadeDistance
         );
         return std::min(topOpacity, bottomOpacity);
     };
@@ -3539,7 +3545,8 @@ void App::rebuildUi()
             listStyle.itemHeight,
         };
 
-        float contentX = itemRect.x + 8.0f;
+        const float rowInset = config().layout.row_horizontal_inset;
+        float contentX = itemRect.x + rowInset;
         if (multiLaunchProgress > 0.0f) {
             const float markerY = itemRect.y + (itemRect.height - multiLaunchMarkerSize) * 0.5f;
             const float markerX = contentX - multiLaunchMarkerSlideOffset * (1.0f - multiLaunchProgress);
@@ -3568,11 +3575,11 @@ void App::rebuildUi()
         }
 
         const float textX = iconRect.x + iconRect.width + desktopIconTextGap;
-        const float pinIconX = itemRect.x + itemRect.width - 8.0f - desktopPinIconSize;
+        const float pinIconX = itemRect.x + itemRect.width - rowInset - desktopPinIconSize;
         const float textWidth = std::max(
             entry.pinned
-                ? itemRect.x + itemRect.width - textX - desktopPinIconSize - desktopPinTextGap - 8.0f
-                : itemRect.x + itemRect.width - textX - 8.0f,
+                ? itemRect.x + itemRect.width - textX - desktopPinIconSize - desktopPinTextGap - rowInset
+                : itemRect.x + itemRect.width - textX - rowInset,
             0.0f
         );
         drawHighlightedText(

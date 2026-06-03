@@ -1,0 +1,58 @@
+[animation]
+enabled = true
+duration_ms = 150
+background_tint_duration_ms = 175
+close_duration_ms = 100
+open_duration_ms = 150
+open_fade_duration_ms = 150
+open_slide_duration_ms = 225
+list_duration_ms = 225
+scroll_duration_ms = 150
+selection_duration_ms = 75
+multi_launch_duration_ms = 150
+frame_timeout_ms = 1
+open_offset_px = 14
+
+[colours]
+background_tint = "#1e2326"
+panel_fill = "#272e33"
+panel_border = "#4f5b58"
+text_field_fill = "#2e383c"
+text = "#d3c6aa"
+placeholder = "#868d80"
+text_selection = "#a7c08059"
+cursor = "#d3c6aa"
+selected_fill = "#414b50f2"
+match_highlight = "#3c4841"
+multi_launch_border = "#a7c080"
+multi_launch_fill = "#a7c080d9"
+icon = "#d3c6aa"
+pin_icon = "#d3c6aa"
+
+[layout]
+panel_padding = 18
+panel_width_fraction = 0.4
+text_field_height = 37
+text_field_horizontal_inset = 8
+list_top_gap = 12
+list_padding = 0
+list_item_height = 42
+list_item_gap = 3
+list_edge_fade_distance = 5
+max_visible_entries = 8
+desktop_icon_size = 30
+desktop_icon_text_gap = 12
+pin_icon_size = 17
+pin_icon_text_gap = 10
+row_horizontal_inset = 8
+multi_launch_marker_size = 16
+multi_launch_marker_text_gap = 10
+multi_launch_marker_slide_offset = 8
+
+[text]
+placeholder = "Search"
+text_field_size = 16
+entry_size = 15
+
+[window]
+background_tint = 0.72
