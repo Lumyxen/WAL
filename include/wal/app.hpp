@@ -13,6 +13,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -30,6 +31,16 @@ struct SwapchainSupport {
     VkSurfaceCapabilitiesKHR capabilities{};
     std::vector<VkSurfaceFormatKHR> formats;
     std::vector<VkPresentModeKHR> presentModes;
+};
+
+struct DesktopEntry {
+    std::string name;
+    std::string iconName;
+    std::string execCommand;
+    std::string workingDirectory;
+    std::string searchText;
+    ui::Bitmap icon;
+    bool iconLoaded = false;
 };
 
 class App {
@@ -58,6 +69,11 @@ private:
     std::string textFieldValue;
     size_t textCursorIndex = 0;
     size_t textSelectionAnchor = 0;
+    std::vector<DesktopEntry> desktopEntries;
+    size_t selectedDesktopEntryIndex = 0;
+    size_t firstVisibleDesktopEntryIndex = 0;
+    size_t lastClickedDesktopEntryIndex = std::numeric_limits<size_t>::max();
+    uint32_t lastClickTime = 0;
     float pointerX = 0.0f;
     float pointerY = 0.0f;
     bool mouseSelectingText = false;
@@ -151,6 +167,7 @@ private:
     static void seatName(void* data, wl_seat* seat, const char* name);
 
     void initWindow();
+    void loadDesktopEntries();
     void setInputRegion();
     void initVulkan();
     void mainLoop();
@@ -192,8 +209,19 @@ private:
     void copySelectionToClipboard() const;
     void cutSelectionToClipboard();
     void pasteFromClipboard();
+    void resetDesktopNavigation();
+    void clampDesktopNavigation();
+    void moveDesktopSelection(int delta);
+    void launchSelectedDesktopEntry();
+    void launchDesktopEntry(const DesktopEntry& entry);
 
     [[nodiscard]] ui::Rect textFieldRect() const;
+    [[nodiscard]] ui::Rect desktopListRect() const;
+    [[nodiscard]] std::optional<size_t> desktopEntryIndexAtPointer() const;
+    [[nodiscard]] ui::Rect panelRect(size_t visibleResultCount) const;
+    [[nodiscard]] size_t visibleDesktopEntryCount() const;
+    [[nodiscard]] std::vector<const DesktopEntry*> filteredDesktopEntries() const;
+    [[nodiscard]] std::vector<DesktopEntry*> visibleDesktopEntries();
     [[nodiscard]] bool hasTextSelection() const;
     [[nodiscard]] size_t textSelectionStart() const;
     [[nodiscard]] size_t textSelectionEnd() const;

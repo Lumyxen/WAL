@@ -5,11 +5,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cctype>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <poll.h>
 #include <set>
@@ -19,6 +23,7 @@
 #include <sys/timerfd.h>
 #include <unistd.h>
 
+#include <gdk-pixbuf/gdk-pixbuf.h>
 #include <linux/input-event-codes.h>
 #include <wayland-client-protocol.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
@@ -40,12 +45,308 @@ constexpr std::array<float, 4> backgroundTint = {
 const ui::Color panelFill = ui::Color::srgb(0x2e, 0x38, 0x3c);
 const ui::Color panelBorder = ui::Color::srgb(0x7a, 0x84, 0x78);
 const ui::Color textFieldFill = ui::Color::srgb(0x28, 0x30, 0x34);
+const ui::Color transparent = ui::Color::srgb(0x27, 0x2e, 0x33, 0.0f);
 constexpr std::string_view textFieldPlaceholder = "Search";
 const ui::TextStyle textFieldPlaceholderStyle{.color = ui::Color::srgb(0x86, 0x8d, 0x80), .size = 16.0f};
 const ui::TextStyle textFieldText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 16.0f};
 constexpr float panelPadding = 18.0f;
 constexpr float textFieldHeight = 37.0f;
 constexpr float textFieldHorizontalTextInset = 8.0f;
+constexpr size_t maxVisibleDesktopEntries = 8;
+constexpr float listTopGap = 12.0f;
+constexpr float desktopIconSize = 30.0f;
+constexpr float desktopIconTextGap = 12.0f;
+const ui::TextStyle desktopEntryText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 15.0f};
+
+std::string trim(std::string_view value)
+{
+    size_t start = 0;
+    while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+        ++start;
+    }
+
+    size_t end = value.size();
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+
+    return std::string(value.substr(start, end - start));
+}
+
+std::string lowercase(std::string_view value)
+{
+    std::string lowered;
+    lowered.reserve(value.size());
+    for (const char character : value) {
+        lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
+    }
+    return lowered;
+}
+
+bool parseBool(std::string_view value)
+{
+    const std::string normalized = lowercase(trim(value));
+    return normalized == "true" || normalized == "1";
+}
+
+ui::ListStyle desktopListStyle()
+{
+    return {
+        .container = {.fill = transparent, .borderWidth = 0.0f},
+        .item = {.fill = transparent, .borderWidth = 0.0f},
+        .selectedFill = ui::Color::srgb(0x37, 0x41, 0x45, 0.95f),
+        .padding = 0.0f,
+        .itemHeight = 42.0f,
+        .itemGap = 3.0f,
+    };
+}
+
+std::vector<std::filesystem::path> xdgDataDirs()
+{
+    std::vector<std::filesystem::path> dirs;
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        dirs.emplace_back(std::filesystem::path(home) / ".local/share");
+    }
+
+    if (const char* dataDirs = std::getenv("XDG_DATA_DIRS"); dataDirs != nullptr && *dataDirs != '\0') {
+        std::string_view rawDirs(dataDirs);
+        size_t start = 0;
+        while (start <= rawDirs.size()) {
+            const size_t separator = rawDirs.find(':', start);
+            const std::string_view dir = rawDirs.substr(
+                start,
+                separator == std::string_view::npos ? std::string_view::npos : separator - start
+            );
+            if (!dir.empty()) {
+                dirs.emplace_back(dir);
+            }
+            if (separator == std::string_view::npos) {
+                break;
+            }
+            start = separator + 1;
+        }
+    } else {
+        dirs.emplace_back("/usr/local/share");
+        dirs.emplace_back("/usr/share");
+    }
+
+    return dirs;
+}
+
+std::optional<std::filesystem::path> resolveIconPath(std::string_view iconName)
+{
+    if (iconName.empty()) {
+        return std::nullopt;
+    }
+
+    const std::filesystem::path iconPath(iconName);
+    std::error_code error;
+    if (iconPath.is_absolute() && std::filesystem::is_regular_file(iconPath, error)) {
+        return iconPath;
+    }
+
+    std::vector<std::string> filenames;
+    if (iconPath.extension().empty()) {
+        filenames = {
+            std::string(iconName) + ".png",
+            std::string(iconName) + ".svg",
+            std::string(iconName) + ".xpm",
+        };
+    } else {
+        filenames = {std::string(iconName)};
+    }
+
+    std::vector<std::filesystem::path> searchRoots;
+    for (const auto& dataDir : xdgDataDirs()) {
+        searchRoots.emplace_back(dataDir / "icons");
+        searchRoots.emplace_back(dataDir / "pixmaps");
+    }
+
+    for (const auto& root : searchRoots) {
+        if (!std::filesystem::is_directory(root, error)) {
+            continue;
+        }
+
+        for (const auto& filename : filenames) {
+            const std::filesystem::path direct = root / filename;
+            if (std::filesystem::is_regular_file(direct, error)) {
+                return direct;
+            }
+        }
+
+        for (std::filesystem::recursive_directory_iterator it(
+                 root,
+                 std::filesystem::directory_options::skip_permission_denied,
+                 error
+             ),
+             end;
+             !error && it != end;
+             it.increment(error)) {
+            if (!it->is_regular_file(error)) {
+                continue;
+            }
+            for (const auto& filename : filenames) {
+                if (it->path().filename() == filename) {
+                    return it->path();
+                }
+            }
+        }
+    }
+
+    return std::nullopt;
+}
+
+ui::Bitmap loadIconBitmap(std::string_view iconName)
+{
+    const auto iconPath = resolveIconPath(iconName);
+    if (!iconPath.has_value()) {
+        return {};
+    }
+
+    GError* error = nullptr;
+    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
+        iconPath->c_str(),
+        static_cast<int>(desktopIconSize),
+        static_cast<int>(desktopIconSize),
+        TRUE,
+        &error
+    );
+    if (pixbuf == nullptr) {
+        if (error != nullptr) {
+            g_error_free(error);
+        }
+        return {};
+    }
+
+    const int width = gdk_pixbuf_get_width(pixbuf);
+    const int height = gdk_pixbuf_get_height(pixbuf);
+    const int channels = gdk_pixbuf_get_n_channels(pixbuf);
+    const int rowStride = gdk_pixbuf_get_rowstride(pixbuf);
+    const bool hasAlpha = gdk_pixbuf_get_has_alpha(pixbuf) != 0;
+    const auto* pixels = gdk_pixbuf_get_pixels(pixbuf);
+
+    ui::Bitmap bitmap{
+        .width = static_cast<uint32_t>(std::max(width, 0)),
+        .height = static_cast<uint32_t>(std::max(height, 0)),
+    };
+    bitmap.pixels.reserve(static_cast<size_t>(bitmap.width) * bitmap.height);
+    for (uint32_t y = 0; y < bitmap.height; ++y) {
+        const guchar* row = pixels + static_cast<size_t>(y) * static_cast<size_t>(rowStride);
+        for (uint32_t x = 0; x < bitmap.width; ++x) {
+            const guchar* pixel = row + static_cast<size_t>(x) * static_cast<size_t>(channels);
+            const float alpha = hasAlpha ? static_cast<float>(pixel[3]) / 255.0f : 1.0f;
+            bitmap.pixels.push_back(ui::Color::srgb(pixel[0], pixel[1], pixel[2], alpha));
+        }
+    }
+
+    g_object_unref(pixbuf);
+    return bitmap;
+}
+
+std::string desktopExecCommand(std::string_view exec)
+{
+    std::string command;
+    command.reserve(exec.size());
+    bool inQuote = false;
+    for (size_t i = 0; i < exec.size(); ++i) {
+        const char character = exec[i];
+        if (character == '"') {
+            inQuote = !inQuote;
+            command.push_back(character);
+            continue;
+        }
+
+        if (!inQuote && character == '%' && i + 1 < exec.size()) {
+            ++i;
+            continue;
+        }
+
+        command.push_back(character);
+    }
+
+    return trim(command);
+}
+
+std::optional<DesktopEntry> parseDesktopEntry(const std::filesystem::path& path)
+{
+    std::ifstream file(path);
+    if (!file) {
+        return std::nullopt;
+    }
+
+    bool inDesktopEntry = false;
+    std::string name;
+    std::string iconName;
+    std::string genericName;
+    std::string exec;
+    std::string workingDirectory;
+    std::string type;
+    bool hidden = false;
+    bool noDisplay = false;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        const std::string trimmed = trim(line);
+        if (trimmed.empty() || trimmed.front() == '#') {
+            continue;
+        }
+
+        if (trimmed.front() == '[' && trimmed.back() == ']') {
+            inDesktopEntry = trimmed == "[Desktop Entry]";
+            continue;
+        }
+        if (!inDesktopEntry) {
+            continue;
+        }
+
+        const size_t equals = trimmed.find('=');
+        if (equals == std::string::npos) {
+            continue;
+        }
+
+        const std::string key = trimmed.substr(0, equals);
+        const std::string value = trimmed.substr(equals + 1);
+        if (key == "Name" && name.empty()) {
+            name = value;
+        } else if (key == "Icon" && iconName.empty()) {
+            iconName = value;
+        } else if (key == "GenericName" && genericName.empty()) {
+            genericName = value;
+        } else if (key == "Exec" && exec.empty()) {
+            exec = value;
+        } else if (key == "Path" && workingDirectory.empty()) {
+            workingDirectory = value;
+        } else if (key == "Type") {
+            type = value;
+        } else if (key == "Hidden") {
+            hidden = parseBool(value);
+        } else if (key == "NoDisplay") {
+            noDisplay = parseBool(value);
+        }
+    }
+
+    if (name.empty() || hidden || noDisplay || (!type.empty() && type != "Application")) {
+        return std::nullopt;
+    }
+
+    std::string searchText = lowercase(name);
+    if (!genericName.empty()) {
+        searchText += ' ';
+        searchText += lowercase(genericName);
+    }
+    if (!exec.empty()) {
+        searchText += ' ';
+        searchText += lowercase(exec);
+    }
+
+    return DesktopEntry{
+        .name = name,
+        .iconName = iconName,
+        .execCommand = desktopExecCommand(exec),
+        .workingDirectory = workingDirectory,
+        .searchText = searchText,
+    };
+}
 
 timespec toTimespec(std::chrono::nanoseconds duration)
 {
@@ -69,6 +370,7 @@ void App::run()
 {
     surfaceWidth = defaultWindowWidth;
     surfaceHeight = defaultWindowHeight;
+    loadDesktopEntries();
 
     initWindow();
     initVulkan();
@@ -253,7 +555,7 @@ void App::pointerMotion(void* data, wl_pointer*, uint32_t, wl_fixed_t surfaceX, 
     }
 }
 
-void App::pointerButton(void* data, wl_pointer*, uint32_t, uint32_t, uint32_t button, uint32_t state)
+void App::pointerButton(void* data, wl_pointer*, uint32_t, uint32_t time, uint32_t button, uint32_t state)
 {
     auto* app = static_cast<App*>(data);
     if (button != BTN_LEFT) {
@@ -269,11 +571,35 @@ void App::pointerButton(void* data, wl_pointer*, uint32_t, uint32_t, uint32_t bu
             app->textSelectionAnchor = app->textCursorIndex;
             app->refreshUi();
         }
+        if (const auto entryIndex = app->desktopEntryIndexAtPointer(); entryIndex.has_value()) {
+            const bool doubleClick = app->lastClickedDesktopEntryIndex == *entryIndex &&
+                time - app->lastClickTime <= 500;
+            app->selectedDesktopEntryIndex = *entryIndex;
+            app->clampDesktopNavigation();
+            app->lastClickedDesktopEntryIndex = *entryIndex;
+            app->lastClickTime = time;
+            app->refreshUi();
+            if (doubleClick) {
+                app->launchSelectedDesktopEntry();
+            }
+        }
     } else {
         app->mouseSelectingText = false;
     }
 }
-void App::pointerAxis(void*, wl_pointer*, uint32_t, uint32_t, wl_fixed_t) {}
+void App::pointerAxis(void* data, wl_pointer*, uint32_t, uint32_t axis, wl_fixed_t value)
+{
+    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
+        return;
+    }
+
+    auto* app = static_cast<App*>(data);
+    if (wl_fixed_to_double(value) > 0.0) {
+        app->moveDesktopSelection(1);
+    } else if (wl_fixed_to_double(value) < 0.0) {
+        app->moveDesktopSelection(-1);
+    }
+}
 void App::pointerFrame(void*, wl_pointer*) {}
 void App::pointerAxisSource(void*, wl_pointer*, uint32_t) {}
 void App::pointerAxisStop(void*, wl_pointer*, uint32_t, uint32_t) {}
@@ -406,6 +732,69 @@ void App::initWindow()
             throw std::runtime_error("failed while waiting for layer surface configure");
         }
     }
+}
+
+void App::loadDesktopEntries()
+{
+    desktopEntries.clear();
+
+    std::vector<std::filesystem::path> applicationDirs;
+    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
+        applicationDirs.emplace_back(std::filesystem::path(home) / ".local/share/applications");
+    }
+
+    if (const char* dataDirs = std::getenv("XDG_DATA_DIRS"); dataDirs != nullptr && *dataDirs != '\0') {
+        std::string_view dirs(dataDirs);
+        size_t start = 0;
+        while (start <= dirs.size()) {
+            const size_t separator = dirs.find(':', start);
+            const std::string_view dir = dirs.substr(
+                start,
+                separator == std::string_view::npos ? std::string_view::npos : separator - start
+            );
+            if (!dir.empty()) {
+                applicationDirs.emplace_back(std::filesystem::path(dir) / "applications");
+            }
+            if (separator == std::string_view::npos) {
+                break;
+            }
+            start = separator + 1;
+        }
+    } else {
+        applicationDirs.emplace_back("/usr/local/share/applications");
+        applicationDirs.emplace_back("/usr/share/applications");
+    }
+
+    std::set<std::string> seenNames;
+    for (const auto& dir : applicationDirs) {
+        std::error_code error;
+        if (!std::filesystem::is_directory(dir, error)) {
+            continue;
+        }
+
+        for (std::filesystem::recursive_directory_iterator it(
+                 dir,
+                 std::filesystem::directory_options::skip_permission_denied,
+                 error
+             ),
+             end;
+             !error && it != end;
+             it.increment(error)) {
+            if (!it->is_regular_file(error) || it->path().extension() != ".desktop") {
+                continue;
+            }
+
+            auto entry = parseDesktopEntry(it->path());
+            if (!entry.has_value() || seenNames.contains(entry->name)) {
+                continue;
+            }
+
+            seenNames.insert(entry->name);
+            desktopEntries.push_back(std::move(*entry));
+        }
+    }
+
+    std::ranges::sort(desktopEntries, {}, &DesktopEntry::name);
 }
 
 void App::setInputRegion()
@@ -1185,6 +1574,7 @@ void App::deleteSelection()
     textFieldValue.erase(start, textSelectionEnd() - start);
     textCursorIndex = start;
     textSelectionAnchor = start;
+    resetDesktopNavigation();
 }
 
 void App::insertText(std::string_view value)
@@ -1206,6 +1596,7 @@ void App::insertText(std::string_view value)
     textFieldValue.insert(textCursorIndex, sanitized);
     textCursorIndex += sanitized.size();
     textSelectionAnchor = textCursorIndex;
+    resetDesktopNavigation();
     refreshUi();
 }
 
@@ -1217,6 +1608,7 @@ void App::deleteBackward()
         textFieldValue.erase(textCursorIndex - 1, 1);
         --textCursorIndex;
         textSelectionAnchor = textCursorIndex;
+        resetDesktopNavigation();
     }
     refreshUi();
 }
@@ -1228,6 +1620,7 @@ void App::deleteForward()
     } else if (textCursorIndex < textFieldValue.size()) {
         textFieldValue.erase(textCursorIndex, 1);
         textSelectionAnchor = textCursorIndex;
+        resetDesktopNavigation();
     }
     refreshUi();
 }
@@ -1304,6 +1697,24 @@ bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
     }
 
     switch (keysym) {
+    case XKB_KEY_Up:
+        moveDesktopSelection(-1);
+        return true;
+    case XKB_KEY_Down:
+        moveDesktopSelection(1);
+        return true;
+    case XKB_KEY_Page_Up:
+        moveDesktopSelection(-static_cast<int>(maxVisibleDesktopEntries));
+        return true;
+    case XKB_KEY_Page_Down:
+        moveDesktopSelection(static_cast<int>(maxVisibleDesktopEntries));
+        return true;
+    case XKB_KEY_Return:
+    case XKB_KEY_KP_Enter:
+        if (allowSingleShotShortcuts) {
+            launchSelectedDesktopEntry();
+        }
+        return false;
     case XKB_KEY_Left:
         moveCursor(textCursorIndex == 0 ? 0 : textCursorIndex - 1, shift);
         return true;
@@ -1493,16 +1904,88 @@ void App::pasteFromClipboard()
     insertText(pasted);
 }
 
+void App::resetDesktopNavigation()
+{
+    selectedDesktopEntryIndex = 0;
+    firstVisibleDesktopEntryIndex = 0;
+    lastClickedDesktopEntryIndex = std::numeric_limits<size_t>::max();
+    lastClickTime = 0;
+}
+
+void App::clampDesktopNavigation()
+{
+    const size_t count = visibleDesktopEntryCount();
+    if (count == 0) {
+        selectedDesktopEntryIndex = 0;
+        firstVisibleDesktopEntryIndex = 0;
+        return;
+    }
+
+    selectedDesktopEntryIndex = std::min(selectedDesktopEntryIndex, count - 1);
+    if (selectedDesktopEntryIndex < firstVisibleDesktopEntryIndex) {
+        firstVisibleDesktopEntryIndex = selectedDesktopEntryIndex;
+    } else if (selectedDesktopEntryIndex >= firstVisibleDesktopEntryIndex + maxVisibleDesktopEntries) {
+        firstVisibleDesktopEntryIndex = selectedDesktopEntryIndex - maxVisibleDesktopEntries + 1;
+    }
+
+    const size_t maxFirstVisible = count > maxVisibleDesktopEntries ? count - maxVisibleDesktopEntries : 0;
+    firstVisibleDesktopEntryIndex = std::min(firstVisibleDesktopEntryIndex, maxFirstVisible);
+}
+
+void App::moveDesktopSelection(int delta)
+{
+    const size_t count = visibleDesktopEntryCount();
+    if (count == 0 || delta == 0) {
+        return;
+    }
+
+    const int current = static_cast<int>(selectedDesktopEntryIndex);
+    const int last = static_cast<int>(count - 1);
+    selectedDesktopEntryIndex = static_cast<size_t>(std::clamp(current + delta, 0, last));
+    clampDesktopNavigation();
+    refreshUi();
+}
+
+void App::launchSelectedDesktopEntry()
+{
+    const std::vector<const DesktopEntry*> entries = filteredDesktopEntries();
+    if (selectedDesktopEntryIndex >= entries.size()) {
+        return;
+    }
+
+    launchDesktopEntry(*entries[selectedDesktopEntryIndex]);
+}
+
+void App::launchDesktopEntry(const DesktopEntry& entry)
+{
+    if (entry.execCommand.empty()) {
+        return;
+    }
+
+    const pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        if (!entry.workingDirectory.empty() && chdir(entry.workingDirectory.c_str()) != 0) {
+            std::fprintf(
+                stderr,
+                "wal: failed to enter desktop entry Path '%s': %s\n",
+                entry.workingDirectory.c_str(),
+                std::strerror(errno)
+            );
+            _exit(127);
+        }
+        execl("/bin/sh", "sh", "-c", entry.execCommand.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    if (pid > 0) {
+        running = false;
+    }
+}
+
 ui::Rect App::textFieldRect() const
 {
-    const float panelWidth = static_cast<float>(swapchainExtent.width) * 0.4f;
-    const float panelHeight = std::clamp(static_cast<float>(swapchainExtent.height) * 0.22f, 180.0f, 280.0f);
-    const ui::Rect panel{
-        (static_cast<float>(swapchainExtent.width) - panelWidth) * 0.5f,
-        (static_cast<float>(swapchainExtent.height) - panelHeight) * 0.5f,
-        panelWidth,
-        panelHeight,
-    };
+    const ui::Rect panel = panelRect(visibleDesktopEntryCount());
 
     return {
         panel.x + panelPadding,
@@ -1510,6 +1993,134 @@ ui::Rect App::textFieldRect() const
         panel.width - panelPadding * 2.0f,
         textFieldHeight,
     };
+}
+
+ui::Rect App::desktopListRect() const
+{
+    const size_t visibleCount = std::min(visibleDesktopEntryCount(), maxVisibleDesktopEntries);
+    if (visibleCount == 0) {
+        return {};
+    }
+
+    const ui::ListStyle listStyle = desktopListStyle();
+    const ui::Rect field = textFieldRect();
+    const ui::Rect panel = panelRect(visibleCount);
+    const float listHeight =
+        listStyle.padding * 2.0f +
+        static_cast<float>(visibleCount) * listStyle.itemHeight +
+        static_cast<float>(visibleCount - 1) * listStyle.itemGap;
+    return {
+        panel.x + panelPadding,
+        field.y + field.height + listTopGap,
+        panel.width - panelPadding * 2.0f,
+        listHeight,
+    };
+}
+
+std::optional<size_t> App::desktopEntryIndexAtPointer() const
+{
+    const size_t count = visibleDesktopEntryCount();
+    if (count == 0) {
+        return std::nullopt;
+    }
+
+    const ui::ListStyle listStyle = desktopListStyle();
+    const ui::Rect listRect = desktopListRect();
+    if (pointerX < listRect.x || pointerX > listRect.x + listRect.width ||
+        pointerY < listRect.y || pointerY > listRect.y + listRect.height) {
+        return std::nullopt;
+    }
+
+    const float localY = pointerY - listRect.y - listStyle.padding;
+    const float rowStride = listStyle.itemHeight + listStyle.itemGap;
+    if (localY < 0.0f) {
+        return std::nullopt;
+    }
+
+    const auto row = static_cast<size_t>(localY / rowStride);
+    if (row >= maxVisibleDesktopEntries || row >= count || localY - static_cast<float>(row) * rowStride > listStyle.itemHeight) {
+        return std::nullopt;
+    }
+
+    const size_t entryIndex = firstVisibleDesktopEntryIndex + row;
+    if (entryIndex >= count) {
+        return std::nullopt;
+    }
+    return entryIndex;
+}
+
+ui::Rect App::panelRect(size_t visibleResultCount) const
+{
+    const ui::ListStyle listStyle = desktopListStyle();
+    const size_t cappedResultCount = std::min(visibleResultCount, maxVisibleDesktopEntries);
+    const float listHeight = cappedResultCount == 0
+        ? 0.0f
+        : listStyle.padding * 2.0f +
+              static_cast<float>(cappedResultCount) * listStyle.itemHeight +
+              static_cast<float>(cappedResultCount - 1) * listStyle.itemGap;
+    const float panelHeight =
+        panelPadding * 2.0f + textFieldHeight + (cappedResultCount == 0 ? 0.0f : listTopGap + listHeight);
+    const float panelWidth = static_cast<float>(swapchainExtent.width) * 0.4f;
+
+    return {
+        (static_cast<float>(swapchainExtent.width) - panelWidth) * 0.5f,
+        (static_cast<float>(swapchainExtent.height) - panelHeight) * 0.5f,
+        panelWidth,
+        panelHeight,
+    };
+}
+
+size_t App::visibleDesktopEntryCount() const
+{
+    size_t count = 0;
+    const std::string query = lowercase(textFieldValue);
+    for (const auto& entry : desktopEntries) {
+        if (!query.empty() && entry.searchText.find(query) == std::string::npos) {
+            continue;
+        }
+
+        ++count;
+    }
+
+    return count;
+}
+
+std::vector<const DesktopEntry*> App::filteredDesktopEntries() const
+{
+    std::vector<const DesktopEntry*> entries;
+    const std::string query = lowercase(textFieldValue);
+    for (const auto& entry : desktopEntries) {
+        if (!query.empty() && entry.searchText.find(query) == std::string::npos) {
+            continue;
+        }
+        entries.push_back(&entry);
+    }
+    return entries;
+}
+
+std::vector<DesktopEntry*> App::visibleDesktopEntries()
+{
+    std::vector<DesktopEntry*> entries;
+    entries.reserve(maxVisibleDesktopEntries);
+
+    const std::string query = lowercase(textFieldValue);
+    size_t matchIndex = 0;
+    for (auto& entry : desktopEntries) {
+        if (!query.empty() && entry.searchText.find(query) == std::string::npos) {
+            continue;
+        }
+
+        if (matchIndex++ < firstVisibleDesktopEntryIndex) {
+            continue;
+        }
+
+        entries.push_back(&entry);
+        if (entries.size() == maxVisibleDesktopEntries) {
+            break;
+        }
+    }
+
+    return entries;
 }
 
 size_t App::textIndexAtPointer(float x) const
@@ -1532,17 +2143,12 @@ size_t App::textIndexAtPointer(float x) const
 void App::rebuildUi()
 {
     uiVertices.clear();
+    clampDesktopNavigation();
 
     ui::Canvas canvas(static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height));
 
-    const float panelWidth = static_cast<float>(swapchainExtent.width) * 0.4f;
-    const float panelHeight = std::clamp(static_cast<float>(swapchainExtent.height) * 0.22f, 180.0f, 280.0f);
-    const ui::Rect panel{
-        (static_cast<float>(swapchainExtent.width) - panelWidth) * 0.5f,
-        (static_cast<float>(swapchainExtent.height) - panelHeight) * 0.5f,
-        panelWidth,
-        panelHeight,
-    };
+    const std::vector<DesktopEntry*> visibleEntries = visibleDesktopEntries();
+    const ui::Rect panel = panelRect(visibleEntries.size());
 
     canvas.box(panel, {.fill = panelFill, .border = panelBorder, .borderWidth = 1.0f});
 
@@ -1560,6 +2166,49 @@ void App::rebuildUi()
         textSelectionAnchor,
         textFieldPlaceholder
     );
+
+    if (!visibleEntries.empty()) {
+        const ui::ListStyle listStyle = desktopListStyle();
+        const ui::Rect listRect = desktopListRect();
+        float y = listRect.y + listStyle.padding;
+        for (size_t i = 0; i < visibleEntries.size(); ++i) {
+            DesktopEntry& entry = *visibleEntries[i];
+            if (!entry.iconLoaded) {
+                entry.icon = loadIconBitmap(entry.iconName);
+                entry.iconLoaded = true;
+            }
+
+            const ui::Rect itemRect{
+                listRect.x + listStyle.padding,
+                y,
+                listRect.width - listStyle.padding * 2.0f,
+                listStyle.itemHeight,
+            };
+            if (firstVisibleDesktopEntryIndex + i == selectedDesktopEntryIndex) {
+                canvas.box(itemRect, {.fill = listStyle.selectedFill, .borderWidth = 0.0f});
+            }
+
+            const float iconY = itemRect.y + (itemRect.height - desktopIconSize) * 0.5f;
+            const ui::Rect iconRect{itemRect.x + 8.0f, iconY, desktopIconSize, desktopIconSize};
+            if (!entry.icon.pixels.empty()) {
+                canvas.bitmap(iconRect, entry.icon);
+            }
+
+            const float textX = iconRect.x + iconRect.width + desktopIconTextGap;
+            canvas.text(
+                {
+                    textX,
+                    itemRect.y,
+                    itemRect.x + itemRect.width - textX - 8.0f,
+                    itemRect.height,
+                },
+                entry.name,
+                desktopEntryText
+            );
+
+            y += listStyle.itemHeight + listStyle.itemGap;
+        }
+    }
 
     const auto vertices = canvas.vertices();
     uiVertices.assign(vertices.begin(), vertices.end());

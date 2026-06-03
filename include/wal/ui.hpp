@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cmath>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -53,6 +54,12 @@ struct Vertex {
     Color color;
 };
 
+struct Bitmap {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<Color> pixels;
+};
+
 struct BoxStyle {
     Color fill = Color::srgb(0x1c, 0x20, 0x23, 0.92f);
     Color border = Color::srgb(0x27, 0x2e, 0x33);
@@ -92,6 +99,7 @@ public:
     void clear();
     void box(Rect rect, BoxStyle style = {});
     void line(Vec2 from, Vec2 to, float thickness, Color color);
+    void bitmap(Rect rect, const Bitmap& bitmap);
     void text(Rect bounds, std::string_view value, TextStyle style = {});
     void textField(
         Rect rect,

@@ -212,6 +212,46 @@ void Canvas::line(Vec2 from, Vec2 to, float thickness, Color color)
     }
 }
 
+void Canvas::bitmap(Rect rect, const Bitmap& bitmap)
+{
+    if (bitmap.width == 0 || bitmap.height == 0 || bitmap.pixels.size() < bitmap.width * bitmap.height) {
+        return;
+    }
+
+    const float pixelWidth = rect.width / static_cast<float>(bitmap.width);
+    const float pixelHeight = rect.height / static_cast<float>(bitmap.height);
+    for (uint32_t y = 0; y < bitmap.height; ++y) {
+        uint32_t x = 0;
+        while (x < bitmap.width) {
+            Color color = bitmap.pixels[y * bitmap.width + x];
+            if (color.a <= 0.0f) {
+                ++x;
+                continue;
+            }
+
+            uint32_t spanWidth = 1;
+            while (x + spanWidth < bitmap.width) {
+                const Color next = bitmap.pixels[y * bitmap.width + x + spanWidth];
+                if (next.r != color.r || next.g != color.g || next.b != color.b || next.a != color.a) {
+                    break;
+                }
+                ++spanWidth;
+            }
+
+            fillRect(
+                {
+                    rect.x + static_cast<float>(x) * pixelWidth,
+                    rect.y + static_cast<float>(y) * pixelHeight,
+                    static_cast<float>(spanWidth) * pixelWidth,
+                    pixelHeight,
+                },
+                color
+            );
+            x += spanWidth;
+        }
+    }
+}
+
 void Canvas::text(Rect bounds, std::string_view value, TextStyle style)
 {
     clippedText(bounds, bounds.x, value, style);
@@ -359,7 +399,6 @@ void Canvas::list(Rect rect, std::span<const std::string_view> items, uint32_t s
         auto itemStyle = style.item;
         if (i == selectedIndex) {
             itemStyle.fill = style.selectedFill;
-            itemStyle.border = Color::srgb(0x7f, 0xbb, 0xca);
         }
 
         const Rect itemRect{rect.x + style.padding, y, itemWidth, style.itemHeight};
