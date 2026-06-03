@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -299,7 +300,7 @@ private:
     [[nodiscard]] bool mainMenuAnimationActive() const;
     [[nodiscard]] bool uiAnimationActive() const;
 
-    [[nodiscard]] VkShaderModule createShaderModule(const std::vector<char>& code);
+    [[nodiscard]] VkShaderModule createShaderModule(std::span<const uint32_t> code);
     [[nodiscard]] bool isDeviceSuitable(VkPhysicalDevice candidate);
     [[nodiscard]] QueueFamilyIndices findQueueFamilies(VkPhysicalDevice candidate);
     [[nodiscard]] bool checkDeviceExtensionSupport(VkPhysicalDevice candidate);

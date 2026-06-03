@@ -26,7 +26,7 @@ add_executable(wal
 )
 
 target_compile_features(wal PRIVATE cxx_std_23)
-target_include_directories(wal PRIVATE include)
+target_include_directories(wal PRIVATE include "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(
     wal
     PRIVATE
@@ -38,9 +38,6 @@ target_link_libraries(
         PkgConfig::GDK_PIXBUF
         PkgConfig::LIBRSVG
 )
-
-set(WAL_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" CACHE PATH "Directory wal reads SPIR-V shaders from at runtime")
-target_compile_definitions(wal PRIVATE SHADER_DIR="${WAL_SHADER_DIR}")
 
 find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
 
@@ -63,10 +60,24 @@ foreach(SHADER ${SHADER_SOURCES})
     list(APPEND SPIRV_SHADERS ${SPIRV_SHADER})
 endforeach()
 
-add_custom_target(wal_shaders DEPENDS ${SPIRV_SHADERS})
-add_dependencies(wal wal_shaders)
+set(EMBEDDED_SHADER_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/wal/embedded_shaders.hpp")
+add_custom_command(
+    OUTPUT "${EMBEDDED_SHADER_HEADER}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/generated/wal"
+    COMMAND
+        ${CMAKE_COMMAND}
+        -DVERT_SHADER=${CMAKE_CURRENT_BINARY_DIR}/shaders/ui.vert.spv
+        -DFRAG_SHADER=${CMAKE_CURRENT_BINARY_DIR}/shaders/ui.frag.spv
+        -DOUTPUT=${EMBEDDED_SHADER_HEADER}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake"
+    DEPENDS ${SPIRV_SHADERS} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedShaders.cmake"
+    VERBATIM
+)
+
+add_custom_target(wal_embedded_shaders DEPENDS "${EMBEDDED_SHADER_HEADER}")
+add_dependencies(wal wal_embedded_shaders)
+target_sources(wal PRIVATE "${EMBEDDED_SHADER_HEADER}")
 
 install(TARGETS wal RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
-install(FILES ${SPIRV_SHADERS} DESTINATION "${CMAKE_INSTALL_DATADIR}/wal/shaders")
 install(FILES config.example.toml DESTINATION "${CMAKE_INSTALL_DOCDIR}")
 install(DIRECTORY docs/ DESTINATION "${CMAKE_INSTALL_DOCDIR}")

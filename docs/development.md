@@ -31,7 +31,7 @@ build/shaders/ui.vert.spv
 build/shaders/ui.frag.spv
 ```
 
-The executable is compiled with `SHADER_DIR` pointing at the build directory's `shaders` folder.
+Those SPIR-V files are converted into a generated C++ header and compiled into the executable.
 
 ## Runtime Model
 

@@ -1,7 +1,7 @@
 #include "wal/app.hpp"
 
 #include "wal/config.hpp"
-#include "wal/io.hpp"
+#include "wal/embedded_shaders.hpp"
 
 #include <algorithm>
 #include <array>
@@ -2183,11 +2183,8 @@ void App::createRenderPass()
 
 void App::createGraphicsPipeline()
 {
-    auto vertShaderCode = readFile(std::string(SHADER_DIR) + "/ui.vert.spv");
-    auto fragShaderCode = readFile(std::string(SHADER_DIR) + "/ui.frag.spv");
-
-    const ShaderModuleHandle vertShaderModule(device, createShaderModule(vertShaderCode));
-    const ShaderModuleHandle fragShaderModule(device, createShaderModule(fragShaderCode));
+    const ShaderModuleHandle vertShaderModule(device, createShaderModule(embedded::uiVertShader));
+    const ShaderModuleHandle fragShaderModule(device, createShaderModule(embedded::uiFragShader));
 
     VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
     vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -3958,12 +3955,12 @@ void App::rebuildUi()
     }
 }
 
-VkShaderModule App::createShaderModule(const std::vector<char>& code)
+VkShaderModule App::createShaderModule(std::span<const uint32_t> code)
 {
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    createInfo.codeSize = code.size();
-    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+    createInfo.codeSize = code.size_bytes();
+    createInfo.pCode = code.data();
 
     VkShaderModule shaderModule = VK_NULL_HANDLE;
     if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
