@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <unordered_map>
+#include <vector>
 
 #include <fontconfig/fontconfig.h>
 #include <ft2build.h>
@@ -71,14 +73,74 @@ struct FontResources {
     return FT_Set_Pixel_Sizes(face, 0, pixelSize) == 0;
 }
 
+[[nodiscard]] uint32_t fontPixelSize(float size)
+{
+    return static_cast<uint32_t>(std::max(std::round(size), 1.0f));
+}
+
 struct TextVerticalMetrics {
     float baseline = 0.0f;
     float inkTop = 0.0f;
     float inkBottom = 0.0f;
 };
 
+struct CachedGlyph {
+    float advance = 0.0f;
+    int bitmapLeft = 0;
+    int bitmapTop = 0;
+    uint32_t width = 0;
+    uint32_t rows = 0;
+    std::vector<uint8_t> alpha;
+};
+
+[[nodiscard]] uint64_t glyphCacheKey(uint32_t pixelSize, unsigned char character)
+{
+    return (static_cast<uint64_t>(pixelSize) << 8u) | static_cast<uint64_t>(character);
+}
+
+[[nodiscard]] const CachedGlyph* cachedGlyph(FT_Face face, float size, unsigned char character, int loadFlags)
+{
+    static std::unordered_map<uint64_t, CachedGlyph> renderedGlyphs;
+    static std::unordered_map<uint64_t, CachedGlyph> metricGlyphs;
+
+    const uint32_t pixelSize = fontPixelSize(size);
+    auto& cache = loadFlags == FT_LOAD_RENDER ? renderedGlyphs : metricGlyphs;
+    const uint64_t key = glyphCacheKey(pixelSize, character);
+    if (const auto cached = cache.find(key); cached != cache.end()) {
+        return &cached->second;
+    }
+
+    if (FT_Load_Char(face, character, loadFlags) != 0) {
+        return nullptr;
+    }
+
+    const auto* glyph = face->glyph;
+    CachedGlyph cached{
+        .advance = static_cast<float>(glyph->advance.x >> 6),
+        .bitmapLeft = glyph->bitmap_left,
+        .bitmapTop = glyph->bitmap_top,
+    };
+
+    if (loadFlags == FT_LOAD_RENDER) {
+        const FT_Bitmap& bitmap = glyph->bitmap;
+        cached.width = bitmap.width;
+        cached.rows = bitmap.rows;
+        cached.alpha.reserve(static_cast<size_t>(cached.width) * cached.rows);
+        for (uint32_t row = 0; row < cached.rows; ++row) {
+            for (uint32_t column = 0; column < cached.width; ++column) {
+                cached.alpha.push_back(bitmap.buffer[row * bitmap.pitch + column]);
+            }
+        }
+    }
+
+    const auto [inserted, _] = cache.emplace(key, std::move(cached));
+    return &inserted->second;
+}
+
 [[nodiscard]] TextVerticalMetrics textVerticalMetrics(Rect bounds, TextStyle style)
 {
+    static std::unordered_map<uint32_t, std::pair<float, float>> inkBoundsBySize;
+
     auto& font = fontResources();
     if (font.face == nullptr || !setFontSize(font.face, style.size)) {
         const float fallbackTop = bounds.y + (bounds.height - style.size) * 0.5f;
@@ -89,37 +151,39 @@ struct TextVerticalMetrics {
         };
     }
 
-    float minY = 0.0f;
-    float maxY = style.size;
-    bool hasInk = false;
-    constexpr std::string_view representativeGlyphs = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    for (const unsigned char character : representativeGlyphs) {
-        if (FT_Load_Char(font.face, character, FT_LOAD_RENDER) != 0) {
-            continue;
+    const uint32_t pixelSize = fontPixelSize(style.size);
+    auto cachedBounds = inkBoundsBySize.find(pixelSize);
+    if (cachedBounds == inkBoundsBySize.end()) {
+        float minY = 0.0f;
+        float maxY = style.size;
+        bool hasInk = false;
+        constexpr std::string_view representativeGlyphs = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        for (const unsigned char character : representativeGlyphs) {
+            const CachedGlyph* glyph = cachedGlyph(font.face, style.size, character, FT_LOAD_RENDER);
+            if (glyph == nullptr || glyph->rows == 0) {
+                continue;
+            }
+
+            const float glyphTop = -static_cast<float>(glyph->bitmapTop);
+            const float glyphBottom = glyphTop + static_cast<float>(glyph->rows);
+            if (!hasInk) {
+                minY = glyphTop;
+                maxY = glyphBottom;
+                hasInk = true;
+            } else {
+                minY = std::min(minY, glyphTop);
+                maxY = std::max(maxY, glyphBottom);
+            }
         }
 
-        const auto* glyph = font.face->glyph;
-        if (glyph->bitmap.rows == 0) {
-            continue;
-        }
-
-        const float glyphTop = -static_cast<float>(glyph->bitmap_top);
-        const float glyphBottom = glyphTop + static_cast<float>(glyph->bitmap.rows);
         if (!hasInk) {
-            minY = glyphTop;
-            maxY = glyphBottom;
-            hasInk = true;
-        } else {
-            minY = std::min(minY, glyphTop);
-            maxY = std::max(maxY, glyphBottom);
+            minY = -style.size * 0.78f;
+            maxY = style.size * 0.22f;
         }
+        cachedBounds = inkBoundsBySize.emplace(pixelSize, std::pair{minY, maxY}).first;
     }
 
-    if (!hasInk) {
-        minY = -style.size * 0.78f;
-        maxY = style.size * 0.22f;
-    }
-
+    const auto [minY, maxY] = cachedBounds->second;
     const float inkHeight = maxY - minY;
     const float baseline = bounds.y + (bounds.height - inkHeight) * 0.5f - minY;
     return {
@@ -141,8 +205,9 @@ float textWidth(std::string_view value, TextStyle style, size_t endIndex)
     float width = 0.0f;
     const size_t clippedEnd = std::min(endIndex, value.size());
     for (size_t i = 0; i < clippedEnd; ++i) {
-        if (FT_Load_Char(font.face, static_cast<unsigned char>(value[i]), FT_LOAD_DEFAULT) == 0) {
-            width += static_cast<float>(font.face->glyph->advance.x >> 6);
+        const CachedGlyph* glyph = cachedGlyph(font.face, style.size, static_cast<unsigned char>(value[i]), FT_LOAD_DEFAULT);
+        if (glyph != nullptr) {
+            width += glyph->advance;
         }
     }
     return width;
@@ -162,8 +227,9 @@ size_t textIndexAtOffset(std::string_view value, float offset, TextStyle style)
     float x = 0.0f;
     for (size_t i = 0; i < value.size(); ++i) {
         float advance = 0.0f;
-        if (FT_Load_Char(font.face, static_cast<unsigned char>(value[i]), FT_LOAD_DEFAULT) == 0) {
-            advance = static_cast<float>(font.face->glyph->advance.x >> 6);
+        const CachedGlyph* glyph = cachedGlyph(font.face, style.size, static_cast<unsigned char>(value[i]), FT_LOAD_DEFAULT);
+        if (glyph != nullptr) {
+            advance = glyph->advance;
         }
         if (offset < x + advance * 0.5f) {
             return i;
@@ -274,12 +340,12 @@ void Canvas::clippedText(Rect bounds, float startX, std::string_view value, Text
     const float maxX = bounds.x + bounds.width;
 
     for (const unsigned char character : value) {
-        if (FT_Load_Char(font.face, character, FT_LOAD_RENDER) != 0) {
+        const CachedGlyph* glyph = cachedGlyph(font.face, style.size, character, FT_LOAD_RENDER);
+        if (glyph == nullptr) {
             continue;
         }
 
-        const auto* glyph = font.face->glyph;
-        const float advance = static_cast<float>(glyph->advance.x >> 6);
+        const float advance = glyph->advance;
         if (x >= maxX) {
             break;
         }
@@ -288,21 +354,20 @@ void Canvas::clippedText(Rect bounds, float startX, std::string_view value, Text
             continue;
         }
 
-        const FT_Bitmap& bitmap = glyph->bitmap;
-        const float glyphX = x + static_cast<float>(glyph->bitmap_left);
-        const float glyphY = baseline - static_cast<float>(glyph->bitmap_top);
-        for (uint32_t row = 0; row < bitmap.rows; ++row) {
+        const float glyphX = x + static_cast<float>(glyph->bitmapLeft);
+        const float glyphY = baseline - static_cast<float>(glyph->bitmapTop);
+        for (uint32_t row = 0; row < glyph->rows; ++row) {
             uint32_t column = 0;
-            while (column < bitmap.width) {
-                const uint8_t alpha = bitmap.buffer[row * bitmap.pitch + column];
+            while (column < glyph->width) {
+                const uint8_t alpha = glyph->alpha[static_cast<size_t>(row) * glyph->width + column];
                 if (alpha == 0) {
                     ++column;
                     continue;
                 }
 
                 uint32_t spanWidth = 1;
-                while (column + spanWidth < bitmap.width &&
-                       bitmap.buffer[row * bitmap.pitch + column + spanWidth] == alpha) {
+                while (column + spanWidth < glyph->width &&
+                       glyph->alpha[static_cast<size_t>(row) * glyph->width + column + spanWidth] == alpha) {
                     ++spanWidth;
                 }
 

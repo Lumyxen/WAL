@@ -69,6 +69,7 @@ private:
     zwlr_layer_surface_v1* layerSurface = nullptr;
 
     bool running = true;
+    bool closing = false;
     bool configured = false;
     bool framebufferResized = false;
     uint32_t surfaceWidth = 0;
@@ -91,10 +92,12 @@ private:
     int keyboardRepeatTimerFd = -1;
     std::optional<uint32_t> repeatingKey;
     std::chrono::steady_clock::time_point backgroundTintFadeStart;
+    std::chrono::steady_clock::time_point closeFadeOutStart;
     std::chrono::steady_clock::time_point mainMenuAnimationStart;
     std::chrono::steady_clock::time_point listAnimationStart;
     std::chrono::steady_clock::time_point listScrollAnimationStart;
     std::chrono::steady_clock::time_point selectionHighlightAnimationStart;
+    std::chrono::steady_clock::time_point multiLaunchModeAnimationStart;
     float listAnimationStartVisibleCount = 0.0f;
     size_t listAnimationTargetVisibleCount = 0;
     float listAnimationStartPanelY = 0.0f;
@@ -108,6 +111,8 @@ private:
     float listScrollAnimationStartOffset = 0.0f;
     float selectionHighlightAnimationStartY = 0.0f;
     float selectionHighlightAnimationTargetY = 0.0f;
+    float closeFadeOutStartBackgroundOpacity = 1.0f;
+    float multiLaunchModeAnimationStartProgress = 0.0f;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -119,6 +124,7 @@ private:
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     std::vector<VkImage> swapchainImages;
     VkFormat swapchainImageFormat = VK_FORMAT_UNDEFINED;
+    VkCompositeAlphaFlagBitsKHR swapchainCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     VkExtent2D swapchainExtent{};
     std::vector<VkImageView> swapchainImageViews;
     std::vector<VkFramebuffer> swapchainFramebuffers;
@@ -195,6 +201,7 @@ private:
 
     void initWindow();
     void loadDesktopEntries();
+    void preloadInitialVisibleAssets();
     void loadPinnedDesktopEntries();
     void savePinnedDesktopEntries() const;
     void loadDesktopEntryRankings();
@@ -251,6 +258,7 @@ private:
     void launchMultiSelectedDesktopEntries();
     void launchSelectedDesktopEntry();
     void launchDesktopEntry(DesktopEntry& entry, bool closeAfterLaunch = true);
+    void requestClose();
     void selectDesktopEntry(const DesktopEntry* entry);
     [[nodiscard]] bool isMultiLaunchEntrySelected(const DesktopEntry* entry) const;
 
@@ -270,6 +278,9 @@ private:
     [[nodiscard]] size_t textIndexAtPointer(float x) const;
     [[nodiscard]] float backgroundTintFadeProgress() const;
     [[nodiscard]] bool backgroundTintFadeActive() const;
+    [[nodiscard]] float closeFadeOutProgress() const;
+    [[nodiscard]] float closeFadeOutOpacity() const;
+    [[nodiscard]] bool closeFadeOutActive() const;
     [[nodiscard]] float mainMenuFadeProgress() const;
     [[nodiscard]] float mainMenuSlideProgress() const;
     [[nodiscard]] float listPopulationProgress() const;
@@ -283,7 +294,10 @@ private:
     [[nodiscard]] float selectionHighlightProgress() const;
     [[nodiscard]] bool selectionHighlightAnimationActive() const;
     [[nodiscard]] float animatedSelectionHighlightY() const;
+    [[nodiscard]] float multiLaunchModeProgress() const;
+    [[nodiscard]] bool multiLaunchModeAnimationActive() const;
     [[nodiscard]] bool mainMenuAnimationActive() const;
+    [[nodiscard]] bool uiAnimationActive() const;
 
     [[nodiscard]] VkShaderModule createShaderModule(const std::vector<char>& code);
     [[nodiscard]] bool isDeviceSuitable(VkPhysicalDevice candidate);

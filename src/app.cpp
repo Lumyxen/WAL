@@ -46,11 +46,13 @@ constexpr std::array<float, 4> backgroundTint = {
     0.72f,
 };
 constexpr std::chrono::milliseconds backgroundTintFadeDuration{175};
+constexpr std::chrono::milliseconds closeFadeOutDuration{100};
 constexpr std::chrono::milliseconds mainMenuFadeDuration{150};
 constexpr std::chrono::milliseconds mainMenuSlideDuration{225};
 constexpr std::chrono::milliseconds listPopulationDuration{225};
 constexpr std::chrono::milliseconds listScrollDuration{150};
 constexpr std::chrono::milliseconds selectionHighlightSlideDuration{75};
+constexpr std::chrono::milliseconds multiLaunchModeSlideDuration{150};
 constexpr float listEdgeFadeDistance = 5.0f;
 constexpr float mainMenuAnimationOffsetPixels = 14.0f;
 constexpr int animationFrameTimeoutMilliseconds = 1;
@@ -75,6 +77,7 @@ const ui::TextStyle desktopEntryText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa),
 const ui::Color desktopEntryMatchHighlight = ui::Color::srgb(0x3c, 0x48, 0x41);
 constexpr float multiLaunchMarkerSize = 16.0f;
 constexpr float multiLaunchMarkerTextGap = 10.0f;
+constexpr float multiLaunchMarkerSlideOffset = 8.0f;
 const ui::Color multiLaunchMarkerBorder = ui::Color::srgb(0xa7, 0xc0, 0x80);
 const ui::Color multiLaunchMarkerFill = ui::Color::srgb(0xa7, 0xc0, 0x80, 0.85f);
 constexpr double desktopEntryRankingHalfLifeSeconds = 14.0 * 24.0 * 60.0 * 60.0;
@@ -105,6 +108,15 @@ std::string lowercase(std::string_view value)
         lowered.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(character))));
     }
     return lowered;
+}
+
+ui::Color colorWithOpacity(ui::Color color, float opacity)
+{
+    color.r *= opacity;
+    color.g *= opacity;
+    color.b *= opacity;
+    color.a *= opacity;
+    return color;
 }
 
 std::string searchAcronym(std::string_view value)
@@ -744,6 +756,7 @@ void App::run()
     surfaceWidth = defaultWindowWidth;
     surfaceHeight = defaultWindowHeight;
     loadDesktopEntries();
+    preloadInitialVisibleAssets();
 
     initWindow();
     initVulkan();
@@ -861,6 +874,11 @@ void App::keyboardKey(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t key
 {
     auto* app = static_cast<App*>(data);
 
+    if (app->closing) {
+        app->stopKeyRepeat(key);
+        return;
+    }
+
     if (state == WL_KEYBOARD_KEY_STATE_RELEASED) {
         app->handleKeyboardRepeat();
         app->stopKeyRepeat(key);
@@ -931,6 +949,10 @@ void App::pointerMotion(void* data, wl_pointer*, uint32_t, wl_fixed_t surfaceX, 
 void App::pointerButton(void* data, wl_pointer*, uint32_t, uint32_t time, uint32_t button, uint32_t state)
 {
     auto* app = static_cast<App*>(data);
+    if (app->closing) {
+        app->mouseSelectingText = false;
+        return;
+    }
     if (button != BTN_LEFT) {
         return;
     }
@@ -1176,6 +1198,25 @@ void App::loadDesktopEntries()
     loadDesktopEntryRankings();
 }
 
+void App::preloadInitialVisibleAssets()
+{
+    for (DesktopEntry* entry : visibleDesktopEntries()) {
+        if (entry == nullptr || entry->iconLoaded) {
+            continue;
+        }
+
+        entry->icon = loadIconBitmap(entry->iconName);
+        entry->iconLoaded = true;
+    }
+
+    for (const DesktopEntry* entry : visibleDesktopEntries()) {
+        if (entry != nullptr && entry->pinned) {
+            static_cast<void>(pinIconBitmap());
+            break;
+        }
+    }
+}
+
 void App::loadPinnedDesktopEntries()
 {
     for (auto& entry : desktopEntries) {
@@ -1333,6 +1374,7 @@ void App::initVulkan()
     listAnimationStart = animationStart;
     listScrollAnimationStart = animationStart;
     selectionHighlightAnimationStart = animationStart;
+    multiLaunchModeAnimationStart = animationStart;
     createUiVertexBuffer();
     createCommandBuffers();
     createSyncObjects();
@@ -1341,18 +1383,23 @@ void App::initVulkan()
 void App::mainLoop()
 {
     bool needsFrame = true;
+    bool hadActiveUiAnimation = false;
     while (running) {
-        if (needsFrame || uiDirty || backgroundTintFadeActive() || mainMenuAnimationActive() ||
-            listPopulationAnimationActive() || listScrollAnimationActive() || selectionHighlightAnimationActive()) {
+        const bool animationActive = uiAnimationActive();
+        if (!animationActive && hadActiveUiAnimation) {
+            uiDirty = true;
+        }
+        hadActiveUiAnimation = animationActive;
+
+        if (needsFrame || uiDirty || animationActive) {
             drawFrame();
             needsFrame = false;
         }
-        dispatchWaylandEvents(
-            backgroundTintFadeActive() || mainMenuAnimationActive() || listPopulationAnimationActive() ||
-                    listScrollAnimationActive() || selectionHighlightAnimationActive()
-                ? animationFrameTimeoutMilliseconds
-                : -1
-        );
+        if (closing && !closeFadeOutActive()) {
+            running = false;
+            break;
+        }
+        dispatchWaylandEvents(animationActive || uiDirty ? 0 : -1);
     }
 
     vkDeviceWaitIdle(device);
@@ -1515,6 +1562,7 @@ void App::createSwapchain()
     SwapchainSupport support = querySwapchainSupport(physicalDevice);
     VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(support.formats);
     VkPresentModeKHR presentMode = chooseSwapPresentMode(support.presentModes);
+    VkCompositeAlphaFlagBitsKHR compositeAlpha = chooseCompositeAlpha(support.capabilities.supportedCompositeAlpha);
     VkExtent2D extent = chooseSwapExtent(support.capabilities);
 
     uint32_t imageCount = support.capabilities.minImageCount + 1;
@@ -1543,7 +1591,7 @@ void App::createSwapchain()
     }
 
     createInfo.preTransform = support.capabilities.currentTransform;
-    createInfo.compositeAlpha = chooseCompositeAlpha(support.capabilities.supportedCompositeAlpha);
+    createInfo.compositeAlpha = compositeAlpha;
     createInfo.presentMode = presentMode;
     createInfo.clipped = VK_TRUE;
 
@@ -1556,6 +1604,7 @@ void App::createSwapchain()
     vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages.data());
 
     swapchainImageFormat = surfaceFormat.format;
+    swapchainCompositeAlpha = compositeAlpha;
     swapchainExtent = extent;
     imagesInFlight.assign(swapchainImages.size(), VK_NULL_HANDLE);
 }
@@ -1847,6 +1896,29 @@ bool App::backgroundTintFadeActive() const
            backgroundTintFadeDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
 }
 
+float App::closeFadeOutProgress() const
+{
+    if (!closing) {
+        return 0.0f;
+    }
+
+    const auto elapsed = std::chrono::steady_clock::now() - closeFadeOutStart;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto durationSeconds = std::chrono::duration<float>(closeFadeOutDuration).count();
+    return std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+}
+
+float App::closeFadeOutOpacity() const
+{
+    return 1.0f - closeFadeOutProgress();
+}
+
+bool App::closeFadeOutActive() const
+{
+    return closing && std::chrono::steady_clock::now() - closeFadeOutStart <
+           closeFadeOutDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+}
+
 float App::mainMenuFadeProgress() const
 {
     const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
@@ -1943,10 +2015,39 @@ float App::animatedSelectionHighlightY() const
            (selectionHighlightAnimationTargetY - selectionHighlightAnimationStartY) * progress;
 }
 
+float App::multiLaunchModeProgress() const
+{
+    const float targetProgress = multiLaunchMode ? 1.0f : 0.0f;
+    if (!multiLaunchModeAnimationActive()) {
+        return targetProgress;
+    }
+
+    const auto elapsed = std::chrono::steady_clock::now() - multiLaunchModeAnimationStart;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto durationSeconds = std::chrono::duration<float>(multiLaunchModeSlideDuration).count();
+    const float rawProgress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    const float easedProgress = rawProgress * rawProgress * (3.0f - 2.0f * rawProgress);
+    return multiLaunchModeAnimationStartProgress +
+           (targetProgress - multiLaunchModeAnimationStartProgress) * easedProgress;
+}
+
+bool App::multiLaunchModeAnimationActive() const
+{
+    return std::chrono::steady_clock::now() - multiLaunchModeAnimationStart <
+           multiLaunchModeSlideDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+}
+
 bool App::mainMenuAnimationActive() const
 {
     return std::chrono::steady_clock::now() - mainMenuAnimationStart <
            mainMenuSlideDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+}
+
+bool App::uiAnimationActive() const
+{
+    return backgroundTintFadeActive() || closeFadeOutActive() || mainMenuAnimationActive() ||
+           listPopulationAnimationActive() || listScrollAnimationActive() ||
+           selectionHighlightAnimationActive() || multiLaunchModeAnimationActive();
 }
 
 void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex, size_t frameIndex)
@@ -1958,13 +2059,18 @@ void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex
         throw std::runtime_error("failed to begin command buffer");
     }
 
-    const float fadeProgress = backgroundTintFadeProgress();
+    const float fadeProgress = (closing ? closeFadeOutStartBackgroundOpacity : backgroundTintFadeProgress()) *
+                               closeFadeOutOpacity();
+    const float clearAlpha = backgroundTint[3] * fadeProgress;
+    const bool premultipliedCompositeAlpha = swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR ||
+        swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    const float clearColorScale = premultipliedCompositeAlpha ? clearAlpha : 1.0f;
     VkClearValue clearColor = {{
         {
-            backgroundTint[0] * fadeProgress,
-            backgroundTint[1] * fadeProgress,
-            backgroundTint[2] * fadeProgress,
-            backgroundTint[3] * fadeProgress,
+            backgroundTint[0] * clearColorScale,
+            backgroundTint[1] * clearColorScale,
+            backgroundTint[2] * clearColorScale,
+            clearAlpha,
         }
     }};
 
@@ -2006,14 +2112,6 @@ void App::drawFrame()
         throw std::runtime_error("failed to wait for frame fence");
     }
 
-    const bool wasUiDirty = uiDirty;
-    if (uiDirty || mainMenuAnimationActive() || listPopulationAnimationActive() || listScrollAnimationActive() ||
-        selectionHighlightAnimationActive()) {
-        rebuildUi();
-        uiDirty = false;
-    }
-    uploadUiVertexBuffer(currentFrame);
-
     uint32_t imageIndex = 0;
     VkResult result = vkAcquireNextImageKHR(
         device,
@@ -2025,7 +2123,6 @@ void App::drawFrame()
     );
 
     if (result == VK_NOT_READY || result == VK_TIMEOUT) {
-        uiDirty = uiDirty || wasUiDirty;
         return;
     }
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -2039,7 +2136,6 @@ void App::drawFrame()
     if (imagesInFlight[imageIndex] != VK_NULL_HANDLE) {
         const VkResult imageFenceResult = vkWaitForFences(device, 1, &imagesInFlight[imageIndex], VK_TRUE, 0);
         if (imageFenceResult == VK_TIMEOUT) {
-            uiDirty = uiDirty || wasUiDirty;
             return;
         }
         if (imageFenceResult != VK_SUCCESS) {
@@ -2047,6 +2143,12 @@ void App::drawFrame()
         }
     }
     imagesInFlight[imageIndex] = inFlightFences[currentFrame];
+
+    if (uiDirty || uiAnimationActive()) {
+        rebuildUi();
+        uiDirty = false;
+    }
+    uploadUiVertexBuffer(currentFrame);
 
     vkResetFences(device, 1, &inFlightFences[currentFrame]);
     vkResetCommandBuffer(commandBuffers[imageIndex], 0);
@@ -2281,7 +2383,7 @@ bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
     const bool shift = xkb_state_mod_name_is_active(xkbState, XKB_MOD_NAME_SHIFT, XKB_STATE_MODS_EFFECTIVE) != 0;
 
     if (allowSingleShotShortcuts && keysym == XKB_KEY_Escape) {
-        running = false;
+        requestClose();
         return false;
     }
 
@@ -2685,6 +2787,8 @@ void App::moveSelectedDesktopEntryPin(int delta)
 
 void App::toggleMultiLaunchMode()
 {
+    multiLaunchModeAnimationStartProgress = multiLaunchModeProgress();
+    multiLaunchModeAnimationStart = std::chrono::steady_clock::now();
     multiLaunchMode = !multiLaunchMode;
     if (!multiLaunchMode) {
         multiLaunchEntries.clear();
@@ -2729,7 +2833,7 @@ void App::launchMultiSelectedDesktopEntries()
     }
 
     if (launched) {
-        running = false;
+        requestClose();
     }
 }
 
@@ -2790,9 +2894,22 @@ void App::launchDesktopEntry(DesktopEntry& entry, bool closeAfterLaunch)
     if (pid > 0) {
         recordDesktopEntryLaunch(entry);
         if (closeAfterLaunch) {
-            running = false;
+            requestClose();
         }
     }
+}
+
+void App::requestClose()
+{
+    if (closing) {
+        return;
+    }
+
+    closing = true;
+    closeFadeOutStartBackgroundOpacity = backgroundTintFadeProgress();
+    closeFadeOutStart = std::chrono::steady_clock::now();
+    stopKeyRepeat();
+    uiDirty = true;
 }
 
 ui::Rect App::textFieldRect() const
@@ -3153,6 +3270,7 @@ void App::rebuildUi()
     const float listWidth = renderedPanel.width - panelPadding * 2.0f;
     const bool listAnimating = listPopulationAnimationActive();
     const float rowStride = listStyle.itemHeight + listStyle.itemGap;
+    const float multiLaunchProgress = multiLaunchModeProgress();
     if (lastAnimatedFirstVisibleDesktopEntryIndex != firstVisibleDesktopEntryIndex) {
         const float currentOffset = listScrollAnimationActive() ? animatedListScrollOffset() : 0.0f;
         const auto previousFirst = static_cast<int64_t>(lastAnimatedFirstVisibleDesktopEntryIndex);
@@ -3251,17 +3369,25 @@ void App::rebuildUi()
         };
 
         float contentX = itemRect.x + 8.0f;
-        if (multiLaunchMode) {
+        if (multiLaunchProgress > 0.0f) {
             const float markerY = itemRect.y + (itemRect.height - multiLaunchMarkerSize) * 0.5f;
-            const ui::Rect markerRect{contentX, markerY, multiLaunchMarkerSize, multiLaunchMarkerSize};
-            canvas.box(markerRect, {.fill = transparent, .border = multiLaunchMarkerBorder, .borderWidth = 1.0f});
+            const float markerX = contentX - multiLaunchMarkerSlideOffset * (1.0f - multiLaunchProgress);
+            const ui::Rect markerRect{markerX, markerY, multiLaunchMarkerSize, multiLaunchMarkerSize};
+            canvas.box(
+                markerRect,
+                {
+                    .fill = transparent,
+                    .border = colorWithOpacity(multiLaunchMarkerBorder, multiLaunchProgress),
+                    .borderWidth = 1.0f,
+                }
+            );
             if (isMultiLaunchEntrySelected(&entry)) {
                 canvas.box(
                     {markerRect.x + 4.0f, markerRect.y + 4.0f, markerRect.width - 8.0f, markerRect.height - 8.0f},
-                    {.fill = multiLaunchMarkerFill, .borderWidth = 0.0f}
+                    {.fill = colorWithOpacity(multiLaunchMarkerFill, multiLaunchProgress), .borderWidth = 0.0f}
                 );
             }
-            contentX += multiLaunchMarkerSize + multiLaunchMarkerTextGap;
+            contentX += (multiLaunchMarkerSize + multiLaunchMarkerTextGap) * multiLaunchProgress;
         }
 
         const float iconY = itemRect.y + (itemRect.height - desktopIconSize) * 0.5f;
@@ -3380,9 +3506,6 @@ void App::rebuildUi()
     for (const VertexOpacityRange& range : listEntryOpacityRanges) {
         const size_t end = std::min(range.end, uiVertices.size());
         for (size_t index = range.begin; index < end; ++index) {
-            uiVertices[index].color.r *= range.opacity;
-            uiVertices[index].color.g *= range.opacity;
-            uiVertices[index].color.b *= range.opacity;
             uiVertices[index].color.a *= range.opacity;
         }
     }
@@ -3390,15 +3513,19 @@ void App::rebuildUi()
     const float fadeProgress = mainMenuFadeProgress();
     const float slideProgress = mainMenuSlideProgress();
     if (fadeProgress < 1.0f || slideProgress < 1.0f) {
-        const float opacity = fadeProgress * fadeProgress;
+        const float opacity = fadeProgress;
         const float yOffset = (1.0f - slideProgress) * mainMenuAnimationOffsetPixels * 2.0f /
                               std::max(static_cast<float>(swapchainExtent.height), 1.0f);
         for (ui::Vertex& vertex : uiVertices) {
             vertex.position.y += yOffset;
-            vertex.color.r *= opacity;
-            vertex.color.g *= opacity;
-            vertex.color.b *= opacity;
             vertex.color.a *= opacity;
+        }
+    }
+
+    const float closeOpacity = closeFadeOutOpacity();
+    if (closeOpacity < 1.0f) {
+        for (ui::Vertex& vertex : uiVertices) {
+            vertex.color.a *= closeOpacity;
         }
     }
 }
