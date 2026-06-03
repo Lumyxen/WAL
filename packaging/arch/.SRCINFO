@@ -1,0 +1,23 @@
+pkgbase = wal-git
+	pkgdesc = Small Wayland application launcher rendered with Vulkan
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/Lumyxen/WAL
+	arch = x86_64
+	license = Apache-2.0
+	makedepends = cmake
+	makedepends = glslang
+	makedepends = pkgconf
+	makedepends = vulkan-headers
+	depends = fontconfig
+	depends = freetype2
+	depends = gdk-pixbuf2
+	depends = librsvg
+	depends = libxkbcommon
+	depends = vulkan-icd-loader
+	depends = wayland
+	optdepends = wl-clipboard: clipboard shortcuts
+	provides = wal
+	conflicts = wal
+
+pkgname = wal-git

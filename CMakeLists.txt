@@ -1,9 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(wal
-    VERSION 0.1.0
+    VERSION 1.0.0
     LANGUAGES CXX
 )
+
+include(GNUInstallDirs)
 
 find_package(Vulkan REQUIRED)
 find_package(PkgConfig REQUIRED)
@@ -36,7 +38,9 @@ target_link_libraries(
         PkgConfig::GDK_PIXBUF
         PkgConfig::LIBRSVG
 )
-target_compile_definitions(wal PRIVATE SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders")
+
+set(WAL_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders" CACHE PATH "Directory wal reads SPIR-V shaders from at runtime")
+target_compile_definitions(wal PRIVATE SHADER_DIR="${WAL_SHADER_DIR}")
 
 find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
 
@@ -61,3 +65,8 @@ endforeach()
 
 add_custom_target(wal_shaders DEPENDS ${SPIRV_SHADERS})
 add_dependencies(wal wal_shaders)
+
+install(TARGETS wal RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES ${SPIRV_SHADERS} DESTINATION "${CMAKE_INSTALL_DATADIR}/wal/shaders")
+install(FILES config.example.toml DESTINATION "${CMAKE_INSTALL_DOCDIR}")
+install(DIRECTORY docs/ DESTINATION "${CMAKE_INSTALL_DOCDIR}")

@@ -1,0 +1,45 @@
+# Maintainer: Lumyxen
+pkgname=wal-git
+pkgver=1.0.0
+pkgrel=1
+pkgdesc='Small Wayland application launcher rendered with Vulkan'
+arch=('x86_64')
+url='https://github.com/Lumyxen/WAL'
+license=('Apache-2.0')
+provides=('wal')
+conflicts=('wal')
+depends=(
+  'fontconfig'
+  'freetype2'
+  'gdk-pixbuf2'
+  'librsvg'
+  'libxkbcommon'
+  'vulkan-icd-loader'
+  'wayland'
+)
+makedepends=(
+  'cmake'
+  'glslang'
+  'pkgconf'
+  'vulkan-headers'
+)
+optdepends=(
+  'wl-clipboard: clipboard shortcuts'
+)
+source=()
+b2sums=()
+
+build() {
+  cmake -S "$startdir/../.." -B "$srcdir/build" \
+    -DCMAKE_BUILD_TYPE=None \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBEXECDIR=lib \
+    -DWAL_SHADER_DIR=/usr/share/wal/shaders \
+    -Wno-dev
+  cmake --build "$srcdir/build"
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install "$srcdir/build"
+  install -Dm644 "$startdir/../../LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
