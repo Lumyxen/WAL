@@ -16,14 +16,17 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <poll.h>
 #include <set>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
 #include <sys/timerfd.h>
+#include <unordered_map>
 #include <unistd.h>
 
 #include <cairo.h>
@@ -36,7 +39,7 @@
 namespace wal {
 namespace {
 
-const std::vector<const char*> deviceExtensions = {
+constexpr std::array deviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
@@ -85,6 +88,117 @@ constexpr double desktopEntryRankingEpsilon = 0.0001;
 constexpr std::string_view pinIconSvg =
     R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#d3c6aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>)";
 
+struct CairoDeleter {
+    void operator()(cairo_t* cairo) const
+    {
+        if (cairo != nullptr) {
+            cairo_destroy(cairo);
+        }
+    }
+};
+
+struct CairoSurfaceDeleter {
+    void operator()(cairo_surface_t* surface) const
+    {
+        if (surface != nullptr) {
+            cairo_surface_destroy(surface);
+        }
+    }
+};
+
+struct GObjectDeleter {
+    void operator()(gpointer object) const
+    {
+        if (object != nullptr) {
+            g_object_unref(object);
+        }
+    }
+};
+
+struct WlRegionDeleter {
+    void operator()(wl_region* region) const
+    {
+        if (region != nullptr) {
+            wl_region_destroy(region);
+        }
+    }
+};
+
+using CairoPtr = std::unique_ptr<cairo_t, CairoDeleter>;
+using CairoSurfacePtr = std::unique_ptr<cairo_surface_t, CairoSurfaceDeleter>;
+using GdkPixbufPtr = std::unique_ptr<GdkPixbuf, GObjectDeleter>;
+using RsvgHandlePtr = std::unique_ptr<RsvgHandle, GObjectDeleter>;
+using WlRegionPtr = std::unique_ptr<wl_region, WlRegionDeleter>;
+
+class MappedMemory {
+public:
+    MappedMemory(void* data, size_t size)
+        : data_(data),
+          size_(size)
+    {
+    }
+
+    MappedMemory(const MappedMemory&) = delete;
+    MappedMemory& operator=(const MappedMemory&) = delete;
+
+    ~MappedMemory()
+    {
+        if (valid()) {
+            munmap(data_, size_);
+        }
+    }
+
+    [[nodiscard]] bool valid() const
+    {
+        return data_ != MAP_FAILED;
+    }
+
+    [[nodiscard]] const char* data() const
+    {
+        return static_cast<const char*>(data_);
+    }
+
+private:
+    void* data_ = MAP_FAILED;
+    size_t size_ = 0;
+};
+
+class ShaderModuleHandle {
+public:
+    ShaderModuleHandle(VkDevice device, VkShaderModule module)
+        : device_(device),
+          module_(module)
+    {
+    }
+
+    ShaderModuleHandle(const ShaderModuleHandle&) = delete;
+    ShaderModuleHandle& operator=(const ShaderModuleHandle&) = delete;
+
+    ~ShaderModuleHandle()
+    {
+        if (module_ != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device_, module_, nullptr);
+        }
+    }
+
+    [[nodiscard]] VkShaderModule get() const
+    {
+        return module_;
+    }
+
+private:
+    VkDevice device_ = VK_NULL_HANDLE;
+    VkShaderModule module_ = VK_NULL_HANDLE;
+};
+
+void clearGError(GError*& error)
+{
+    if (error != nullptr) {
+        g_error_free(error);
+        error = nullptr;
+    }
+}
+
 std::string trim(std::string_view value)
 {
     size_t start = 0;
@@ -116,6 +230,14 @@ ui::Color colorWithOpacity(ui::Color color, float opacity)
     color.g *= opacity;
     color.b *= opacity;
     color.a *= opacity;
+    return color;
+}
+
+ui::Color premultipliedColor(ui::Color color)
+{
+    color.r *= color.a;
+    color.g *= color.a;
+    color.b *= color.a;
     return color;
 }
 
@@ -263,6 +385,51 @@ bool desktopEntryOrderLessAt(const DesktopEntry* left, const DesktopEntry* right
     }
 
     return left->name < right->name;
+}
+
+template <typename Entry>
+void sortDesktopEntryPointers(std::vector<Entry*>& entries, std::string_view query)
+{
+    const int64_t now = currentUnixTimestamp();
+    if (query.empty()) {
+        std::ranges::stable_sort(entries, [now](const DesktopEntry* left, const DesktopEntry* right) {
+            return desktopEntryOrderLessAt(left, right, now);
+        });
+        return;
+    }
+
+    std::ranges::stable_sort(entries, [query, now](const DesktopEntry* left, const DesktopEntry* right) {
+        const int leftRank = desktopEntryMatchRank(*left, query);
+        const int rightRank = desktopEntryMatchRank(*right, query);
+        if (leftRank != rightRank) {
+            return leftRank < rightRank;
+        }
+        return desktopEntryOrderLessAt(left, right, now);
+    });
+}
+
+template <typename Entry>
+std::vector<Entry*> matchingDesktopEntryPointers(std::span<Entry> desktopEntries, std::string_view query)
+{
+    std::vector<Entry*> entries;
+    entries.reserve(desktopEntries.size());
+    for (Entry& entry : desktopEntries) {
+        if (query.empty() || desktopEntryMatchesQuery(entry, query)) {
+            entries.push_back(&entry);
+        }
+    }
+
+    sortDesktopEntryPointers(entries, query);
+    return entries;
+}
+
+template <typename Entry>
+std::vector<Entry*> desktopEntrySlice(const std::vector<Entry*>& entries, size_t firstIndex, size_t maxCount)
+{
+    const size_t begin = std::min(firstIndex, entries.size());
+    const size_t count = std::min(maxCount, entries.size() - begin);
+    return {entries.begin() + static_cast<std::ptrdiff_t>(begin),
+            entries.begin() + static_cast<std::ptrdiff_t>(begin + count)};
 }
 
 bool parseBool(std::string_view value)
@@ -547,69 +714,65 @@ void appendRoundedRectangle(cairo_t* cairo, double x, double y, double width, do
 
 ui::Bitmap drawDefaultDesktopIconBitmap()
 {
-    cairo_surface_t* surface = cairo_image_surface_create(
+    CairoSurfacePtr surface(cairo_image_surface_create(
         CAIRO_FORMAT_ARGB32,
         static_cast<int>(desktopIconSize),
         static_cast<int>(desktopIconSize)
-    );
-    cairo_t* cairo = cairo_create(surface);
-    cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(cairo);
-    cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
+    ));
+    CairoPtr cairo(cairo_create(surface.get()));
+    cairo_set_operator(cairo.get(), CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cairo.get());
+    cairo_set_operator(cairo.get(), CAIRO_OPERATOR_OVER);
 
     constexpr double sourceSize = 24.0;
     const double scale = static_cast<double>(desktopIconSize) / sourceSize;
-    cairo_scale(cairo, scale, scale);
+    cairo_scale(cairo.get(), scale, scale);
     const ui::Color iconColor = config().colours.icon;
     cairo_set_source_rgba(
-        cairo,
+        cairo.get(),
         linearToSrgb(iconColor.r),
         linearToSrgb(iconColor.g),
         linearToSrgb(iconColor.b),
         iconColor.a
     );
-    cairo_set_line_width(cairo, 2.0);
-    cairo_set_line_cap(cairo, CAIRO_LINE_CAP_ROUND);
-    cairo_set_line_join(cairo, CAIRO_LINE_JOIN_ROUND);
+    cairo_set_line_width(cairo.get(), 2.0);
+    cairo_set_line_cap(cairo.get(), CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join(cairo.get(), CAIRO_LINE_JOIN_ROUND);
 
-    appendRoundedRectangle(cairo, 3.0, 3.0, 18.0, 18.0, 2.0);
-    cairo_stroke(cairo);
+    appendRoundedRectangle(cairo.get(), 3.0, 3.0, 18.0, 18.0, 2.0);
+    cairo_stroke(cairo.get());
 
-    cairo_arc(cairo, 9.0, 9.0, 2.0, 0.0, std::numbers::pi * 2.0);
-    cairo_stroke(cairo);
+    cairo_arc(cairo.get(), 9.0, 9.0, 2.0, 0.0, std::numbers::pi * 2.0);
+    cairo_stroke(cairo.get());
 
-    cairo_move_to(cairo, 21.0, 15.0);
-    cairo_line_to(cairo, 17.914, 11.914);
-    cairo_curve_to(cairo, 17.133, 11.133, 15.867, 11.133, 15.086, 11.914);
-    cairo_line_to(cairo, 6.0, 21.0);
-    cairo_stroke(cairo);
+    cairo_move_to(cairo.get(), 21.0, 15.0);
+    cairo_line_to(cairo.get(), 17.914, 11.914);
+    cairo_curve_to(cairo.get(), 17.133, 11.133, 15.867, 11.133, 15.086, 11.914);
+    cairo_line_to(cairo.get(), 6.0, 21.0);
+    cairo_stroke(cairo.get());
 
-    cairo_destroy(cairo);
-    ui::Bitmap bitmap = cairoSurfaceToBitmap(surface);
-    cairo_surface_destroy(surface);
-    return bitmap;
+    cairo.reset();
+    return cairoSurfaceToBitmap(surface.get());
 }
 
 ui::Bitmap loadSvgBitmap(const std::filesystem::path& path)
 {
     GError* error = nullptr;
-    RsvgHandle* handle = rsvg_handle_new_from_file(path.c_str(), &error);
+    RsvgHandlePtr handle(rsvg_handle_new_from_file(path.c_str(), &error));
     if (handle == nullptr) {
-        if (error != nullptr) {
-            g_error_free(error);
-        }
+        clearGError(error);
         return {};
     }
 
-    cairo_surface_t* surface = cairo_image_surface_create(
+    CairoSurfacePtr surface(cairo_image_surface_create(
         CAIRO_FORMAT_ARGB32,
         static_cast<int>(desktopIconSize),
         static_cast<int>(desktopIconSize)
-    );
-    cairo_t* cairo = cairo_create(surface);
-    cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(cairo);
-    cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
+    ));
+    CairoPtr cairo(cairo_create(surface.get()));
+    cairo_set_operator(cairo.get(), CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cairo.get());
+    cairo_set_operator(cairo.get(), CAIRO_OPERATOR_OVER);
 
     const RsvgRectangle viewport{
         .x = 0.0,
@@ -617,69 +780,59 @@ ui::Bitmap loadSvgBitmap(const std::filesystem::path& path)
         .width = static_cast<double>(desktopIconSize),
         .height = static_cast<double>(desktopIconSize),
     };
-    const gboolean rendered = rsvg_handle_render_document(handle, cairo, &viewport, &error);
-    cairo_destroy(cairo);
-    g_object_unref(handle);
+    const gboolean rendered = rsvg_handle_render_document(handle.get(), cairo.get(), &viewport, &error);
+    cairo.reset();
 
     if (rendered == FALSE) {
-        if (error != nullptr) {
-            g_error_free(error);
-        }
-        cairo_surface_destroy(surface);
+        clearGError(error);
         return {};
     }
 
-    ui::Bitmap bitmap = cairoSurfaceToBitmap(surface);
-    cairo_surface_destroy(surface);
-    return bitmap;
+    clearGError(error);
+    return cairoSurfaceToBitmap(surface.get());
 }
 
 ui::Bitmap loadPixbufBitmap(const std::filesystem::path& path)
 {
     GError* error = nullptr;
-    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
+    GdkPixbufPtr pixbuf(gdk_pixbuf_new_from_file_at_scale(
         path.c_str(),
         static_cast<int>(desktopIconSize),
         static_cast<int>(desktopIconSize),
         TRUE,
         &error
-    );
+    ));
     if (pixbuf == nullptr) {
-        if (error != nullptr) {
-            g_error_free(error);
-        }
+        clearGError(error);
         return {};
     }
 
-    ui::Bitmap bitmap = pixbufToBitmap(pixbuf);
-    g_object_unref(pixbuf);
-    return bitmap;
+    clearGError(error);
+    return pixbufToBitmap(pixbuf.get());
 }
 
 std::vector<float> renderSvgAlphaMask(std::string_view svg, uint32_t size)
 {
     GError* error = nullptr;
-    RsvgHandle* handle = rsvg_handle_new_from_data(
+    RsvgHandlePtr handle(rsvg_handle_new_from_data(
         reinterpret_cast<const guint8*>(svg.data()),
         svg.size(),
         &error
-    );
+    ));
     if (handle == nullptr) {
-        if (error != nullptr) {
-            g_error_free(error);
-        }
+        clearGError(error);
         return {};
     }
 
-    cairo_surface_t* surface = cairo_image_surface_create(
+    CairoSurfacePtr surface(cairo_image_surface_create(
         CAIRO_FORMAT_ARGB32,
         static_cast<int>(size),
         static_cast<int>(size)
-    );
-    cairo_t* cairo = cairo_create(surface);
-    cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
-    cairo_paint(cairo);
-    cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
+    ));
+    CairoPtr cairo(cairo_create(surface.get()));
+    cairo_set_operator(cairo.get(), CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cairo.get());
+    cairo_set_operator(cairo.get(), CAIRO_OPERATOR_OVER);
 
     const RsvgRectangle viewport{
         .x = 0.0,
@@ -687,21 +840,18 @@ std::vector<float> renderSvgAlphaMask(std::string_view svg, uint32_t size)
         .width = static_cast<double>(size),
         .height = static_cast<double>(size),
     };
-    const gboolean rendered = rsvg_handle_render_document(handle, cairo, &viewport, &error);
-    cairo_destroy(cairo);
-    g_object_unref(handle);
+    const gboolean rendered = rsvg_handle_render_document(handle.get(), cairo.get(), &viewport, &error);
+    cairo.reset();
 
     if (rendered == FALSE) {
-        if (error != nullptr) {
-            g_error_free(error);
-        }
-        cairo_surface_destroy(surface);
+        clearGError(error);
         return {};
     }
 
-    cairo_surface_flush(surface);
-    const int stride = cairo_image_surface_get_stride(surface);
-    const unsigned char* data = cairo_image_surface_get_data(surface);
+    clearGError(error);
+    cairo_surface_flush(surface.get());
+    const int stride = cairo_image_surface_get_stride(surface.get());
+    const unsigned char* data = cairo_image_surface_get_data(surface.get());
     std::vector<float> alphaMask(static_cast<size_t>(size) * size, 0.0f);
     for (uint32_t y = 0; y < size; ++y) {
         const unsigned char* row = data + static_cast<size_t>(y) * static_cast<size_t>(stride);
@@ -711,7 +861,6 @@ std::vector<float> renderSvgAlphaMask(std::string_view svg, uint32_t size)
         }
     }
 
-    cairo_surface_destroy(surface);
     return alphaMask;
 }
 
@@ -806,6 +955,17 @@ const ui::Bitmap& defaultDesktopIconBitmap()
 
 ui::Bitmap loadIconBitmap(std::string_view iconName)
 {
+    static std::unordered_map<std::string, ui::Bitmap> bitmapCache;
+    const std::string cacheKey(iconName);
+    if (const auto cached = bitmapCache.find(cacheKey); cached != bitmapCache.end()) {
+        return cached->second;
+    }
+
+    const auto cacheAndReturn = [&](ui::Bitmap bitmap) {
+        const auto [cached, _] = bitmapCache.emplace(cacheKey, std::move(bitmap));
+        return cached->second;
+    };
+
     std::vector<std::string_view> iconNames = {iconName};
     if (iconName.starts_with("application-x-")) {
         iconNames.push_back("application-x-executable");
@@ -822,12 +982,12 @@ ui::Bitmap loadIconBitmap(std::string_view iconName)
                 bitmap = loadSvgBitmap(iconPath);
             }
             if (!bitmap.pixels.empty()) {
-                return bitmap;
+                return cacheAndReturn(std::move(bitmap));
             }
         }
     }
 
-    return defaultDesktopIconBitmap();
+    return cacheAndReturn(defaultDesktopIconBitmap());
 }
 
 std::string desktopExecCommand(std::string_view exec)
@@ -963,14 +1123,19 @@ bool QueueFamilyIndices::complete() const
 
 void App::run()
 {
-    surfaceWidth = defaultWindowWidth;
-    surfaceHeight = defaultWindowHeight;
-    loadDesktopEntries();
-    preloadInitialVisibleAssets();
+    try {
+        surfaceWidth = defaultWindowWidth;
+        surfaceHeight = defaultWindowHeight;
+        loadDesktopEntries();
+        preloadInitialVisibleAssets();
 
-    initWindow();
-    initVulkan();
-    mainLoop();
+        initWindow();
+        initVulkan();
+        mainLoop();
+    } catch (...) {
+        cleanup();
+        throw;
+    }
     cleanup();
 }
 
@@ -1033,9 +1198,9 @@ void App::keyboardKeymap(void* data, wl_keyboard*, uint32_t format, int32_t fd, 
         return;
     }
 
-    void* map = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    MappedMemory map(mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0), size);
     close(fd);
-    if (map == MAP_FAILED) {
+    if (!map.valid()) {
         return;
     }
 
@@ -1043,17 +1208,15 @@ void App::keyboardKeymap(void* data, wl_keyboard*, uint32_t format, int32_t fd, 
         app->xkbContext = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
     }
     if (app->xkbContext == nullptr) {
-        munmap(map, size);
         return;
     }
 
     xkb_keymap* keymap = xkb_keymap_new_from_string(
         app->xkbContext,
-        static_cast<const char*>(map),
+        map.data(),
         XKB_KEYMAP_FORMAT_TEXT_V1,
         XKB_KEYMAP_COMPILE_NO_FLAGS
     );
-    munmap(map, size);
     if (keymap == nullptr) {
         return;
     }
@@ -1348,30 +1511,8 @@ void App::loadDesktopEntries()
     desktopEntries.clear();
 
     std::vector<std::filesystem::path> applicationDirs;
-    if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-        applicationDirs.emplace_back(std::filesystem::path(home) / ".local/share/applications");
-    }
-
-    if (const char* dataDirs = std::getenv("XDG_DATA_DIRS"); dataDirs != nullptr && *dataDirs != '\0') {
-        std::string_view dirs(dataDirs);
-        size_t start = 0;
-        while (start <= dirs.size()) {
-            const size_t separator = dirs.find(':', start);
-            const std::string_view dir = dirs.substr(
-                start,
-                separator == std::string_view::npos ? std::string_view::npos : separator - start
-            );
-            if (!dir.empty()) {
-                applicationDirs.emplace_back(std::filesystem::path(dir) / "applications");
-            }
-            if (separator == std::string_view::npos) {
-                break;
-            }
-            start = separator + 1;
-        }
-    } else {
-        applicationDirs.emplace_back("/usr/local/share/applications");
-        applicationDirs.emplace_back("/usr/share/applications");
+    for (const auto& dataDir : xdgDataDirs()) {
+        applicationDirs.emplace_back(dataDir / "applications");
     }
 
     std::set<std::string> seenNames;
@@ -1410,20 +1551,21 @@ void App::loadDesktopEntries()
 
 void App::preloadInitialVisibleAssets()
 {
-    for (DesktopEntry* entry : visibleDesktopEntries()) {
+    const std::vector<DesktopEntry*> entries = visibleDesktopEntries();
+    bool needsPinIcon = false;
+    for (DesktopEntry* entry : entries) {
         if (entry == nullptr || entry->iconLoaded) {
+            needsPinIcon = needsPinIcon || (entry != nullptr && entry->pinned);
             continue;
         }
 
         entry->icon = loadIconBitmap(entry->iconName);
         entry->iconLoaded = true;
+        needsPinIcon = needsPinIcon || entry->pinned;
     }
 
-    for (const DesktopEntry* entry : visibleDesktopEntries()) {
-        if (entry != nullptr && entry->pinned) {
-            static_cast<void>(pinIconBitmap());
-            break;
-        }
+    if (needsPinIcon) {
+        static_cast<void>(pinIconBitmap());
     }
 }
 
@@ -1439,6 +1581,12 @@ void App::loadPinnedDesktopEntries()
         return;
     }
 
+    std::unordered_map<std::string, DesktopEntry*> entriesByName;
+    entriesByName.reserve(desktopEntries.size());
+    for (auto& entry : desktopEntries) {
+        entriesByName.emplace(entry.name, &entry);
+    }
+
     int pinOrder = 0;
     std::string name;
     while (std::getline(file, name)) {
@@ -1446,12 +1594,10 @@ void App::loadPinnedDesktopEntries()
             continue;
         }
 
-        for (auto& entry : desktopEntries) {
-            if (!entry.pinned && entry.name == name) {
-                entry.pinned = true;
-                entry.pinOrder = pinOrder++;
-                break;
-            }
+        const auto entry = entriesByName.find(name);
+        if (entry != entriesByName.end() && !entry->second->pinned) {
+            entry->second->pinned = true;
+            entry->second->pinOrder = pinOrder++;
         }
     }
 }
@@ -1489,6 +1635,12 @@ void App::loadDesktopEntryRankings()
         return;
     }
 
+    std::unordered_map<std::string, DesktopEntry*> entriesByName;
+    entriesByName.reserve(desktopEntries.size());
+    for (auto& entry : desktopEntries) {
+        entriesByName.emplace(entry.name, &entry);
+    }
+
     std::string line;
     while (std::getline(file, line)) {
         if (line.empty()) {
@@ -1513,12 +1665,9 @@ void App::loadDesktopEntryRankings()
         }
 
         const std::string name = line.substr(secondTab + 1);
-        for (auto& entry : desktopEntries) {
-            if (entry.name == name) {
-                entry.rankingScore = score;
-                entry.rankingUpdatedAt = updatedAt;
-                break;
-            }
+        if (const auto entry = entriesByName.find(name); entry != entriesByName.end()) {
+            entry->second->rankingScore = score;
+            entry->second->rankingUpdatedAt = updatedAt;
         }
     }
 }
@@ -1556,13 +1705,12 @@ void App::recordDesktopEntryLaunch(DesktopEntry& entry)
 
 void App::setInputRegion()
 {
-    wl_region* inputRegion = wl_compositor_create_region(compositor);
+    WlRegionPtr inputRegion(wl_compositor_create_region(compositor));
     if (inputRegion == nullptr) {
         throw std::runtime_error("failed to create Wayland input region");
     }
 
-    wl_surface_set_input_region(waylandSurface, inputRegion);
-    wl_region_destroy(inputRegion);
+    wl_surface_set_input_region(waylandSurface, inputRegion.get());
     wl_surface_commit(waylandSurface);
 }
 
@@ -1617,57 +1765,98 @@ void App::mainLoop()
 
 void App::cleanup()
 {
-    cleanupSwapchain();
+    if (device != VK_NULL_HANDLE) {
+        cleanupSwapchain();
 
-    for (size_t i = 0; i < maxFramesInFlight; ++i) {
-        vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
-        vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
-        vkDestroyFence(device, inFlightFences[i], nullptr);
+        for (VkSemaphore semaphore : renderFinishedSemaphores) {
+            if (semaphore != VK_NULL_HANDLE) {
+                vkDestroySemaphore(device, semaphore, nullptr);
+            }
+        }
+        renderFinishedSemaphores.clear();
+
+        for (VkSemaphore semaphore : imageAvailableSemaphores) {
+            if (semaphore != VK_NULL_HANDLE) {
+                vkDestroySemaphore(device, semaphore, nullptr);
+            }
+        }
+        imageAvailableSemaphores.clear();
+
+        for (VkFence fence : inFlightFences) {
+            if (fence != VK_NULL_HANDLE) {
+                vkDestroyFence(device, fence, nullptr);
+            }
+        }
+        inFlightFences.clear();
+
+        if (commandPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(device, commandPool, nullptr);
+            commandPool = VK_NULL_HANDLE;
+        }
+        vkDestroyDevice(device, nullptr);
+        device = VK_NULL_HANDLE;
     }
 
-    vkDestroyCommandPool(device, commandPool, nullptr);
-    vkDestroyDevice(device, nullptr);
-    vkDestroySurfaceKHR(instance, surface, nullptr);
-    vkDestroyInstance(instance, nullptr);
+    if (surface != VK_NULL_HANDLE && instance != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(instance, surface, nullptr);
+        surface = VK_NULL_HANDLE;
+    }
+    if (instance != VK_NULL_HANDLE) {
+        vkDestroyInstance(instance, nullptr);
+        instance = VK_NULL_HANDLE;
+    }
 
     if (keyboardRepeatTimerFd != -1) {
         close(keyboardRepeatTimerFd);
+        keyboardRepeatTimerFd = -1;
     }
     if (pointer != nullptr) {
         wl_pointer_release(pointer);
+        pointer = nullptr;
     }
     if (keyboard != nullptr) {
         wl_keyboard_release(keyboard);
+        keyboard = nullptr;
     }
     if (xkbState != nullptr) {
         xkb_state_unref(xkbState);
+        xkbState = nullptr;
     }
     if (xkbKeymap != nullptr) {
         xkb_keymap_unref(xkbKeymap);
+        xkbKeymap = nullptr;
     }
     if (xkbContext != nullptr) {
         xkb_context_unref(xkbContext);
+        xkbContext = nullptr;
     }
     if (layerSurface != nullptr) {
         zwlr_layer_surface_v1_destroy(layerSurface);
+        layerSurface = nullptr;
     }
     if (waylandSurface != nullptr) {
         wl_surface_destroy(waylandSurface);
+        waylandSurface = nullptr;
     }
     if (seat != nullptr) {
         wl_seat_destroy(seat);
+        seat = nullptr;
     }
     if (layerShell != nullptr) {
         zwlr_layer_shell_v1_destroy(layerShell);
+        layerShell = nullptr;
     }
     if (compositor != nullptr) {
         wl_compositor_destroy(compositor);
+        compositor = nullptr;
     }
     if (registry != nullptr) {
         wl_registry_destroy(registry);
+        registry = nullptr;
     }
     if (display != nullptr) {
         wl_display_disconnect(display);
+        display = nullptr;
     }
 }
 
@@ -1888,19 +2077,19 @@ void App::createGraphicsPipeline()
     auto vertShaderCode = readFile(std::string(SHADER_DIR) + "/ui.vert.spv");
     auto fragShaderCode = readFile(std::string(SHADER_DIR) + "/ui.frag.spv");
 
-    VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
-    VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+    const ShaderModuleHandle vertShaderModule(device, createShaderModule(vertShaderCode));
+    const ShaderModuleHandle fragShaderModule(device, createShaderModule(fragShaderCode));
 
     VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
     vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
-    vertShaderStageInfo.module = vertShaderModule;
+    vertShaderStageInfo.module = vertShaderModule.get();
     vertShaderStageInfo.pName = "main";
 
     VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
     fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    fragShaderStageInfo.module = fragShaderModule;
+    fragShaderStageInfo.module = fragShaderModule.get();
     fragShaderStageInfo.pName = "main";
 
     VkPipelineShaderStageCreateInfo shaderStages[] = {vertShaderStageInfo, fragShaderStageInfo};
@@ -1963,7 +2152,12 @@ void App::createGraphicsPipeline()
 
     VkPipelineColorBlendAttachmentState colorBlendAttachment{};
     colorBlendAttachment.blendEnable = VK_TRUE;
-    colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    const bool premultipliedSwapchain =
+        swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR ||
+        swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    colorBlendAttachment.srcColorBlendFactor = premultipliedSwapchain
+        ? VK_BLEND_FACTOR_ONE
+        : VK_BLEND_FACTOR_SRC_ALPHA;
     colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
     colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
     colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
@@ -2000,9 +2194,6 @@ void App::createGraphicsPipeline()
     if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) {
         throw std::runtime_error("failed to create graphics pipeline");
     }
-
-    vkDestroyShaderModule(device, fragShaderModule, nullptr);
-    vkDestroyShaderModule(device, vertShaderModule, nullptr);
 }
 
 void App::createFramebuffers()
@@ -2056,17 +2247,19 @@ void App::createUiVertexBuffer()
 
 void App::createCommandBuffers()
 {
-    commandBuffers.resize(swapchainFramebuffers.size());
+    std::vector<VkCommandBuffer> allocatedCommandBuffers(swapchainFramebuffers.size());
 
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.commandPool = commandPool;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = static_cast<uint32_t>(commandBuffers.size());
+    allocInfo.commandBufferCount = static_cast<uint32_t>(allocatedCommandBuffers.size());
 
-    if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS) {
+    if (vkAllocateCommandBuffers(device, &allocInfo, allocatedCommandBuffers.data()) != VK_SUCCESS) {
         throw std::runtime_error("failed to allocate command buffers");
     }
+
+    commandBuffers = std::move(allocatedCommandBuffers);
 }
 
 void App::createSyncObjects()
@@ -2236,9 +2429,10 @@ void App::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t imageIndex
     const float fadeProgress = (closing ? closeFadeOutStartBackgroundOpacity : backgroundTintFadeProgress()) *
                                closeFadeOutOpacity();
     const float clearAlpha = backgroundTint[3] * fadeProgress;
-    const bool premultipliedCompositeAlpha = swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR ||
+    const bool premultipliedSwapchain =
+        swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR ||
         swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-    const float clearColorScale = premultipliedCompositeAlpha ? clearAlpha : 1.0f;
+    const float clearColorScale = premultipliedSwapchain ? clearAlpha : fadeProgress;
     VkClearValue clearColor = {{
         {
             backgroundTint[0] * clearColorScale,
@@ -2390,6 +2584,10 @@ void App::recreateSwapchain()
 
 void App::cleanupSwapchain()
 {
+    if (device == VK_NULL_HANDLE) {
+        return;
+    }
+
     if (!commandBuffers.empty()) {
         vkFreeCommandBuffers(device, commandPool, static_cast<uint32_t>(commandBuffers.size()), commandBuffers.data());
         commandBuffers.clear();
@@ -2398,24 +2596,36 @@ void App::cleanupSwapchain()
     destroyUiVertexBuffer();
 
     for (auto framebuffer : swapchainFramebuffers) {
-        vkDestroyFramebuffer(device, framebuffer, nullptr);
+        if (framebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
     }
     swapchainFramebuffers.clear();
 
-    vkDestroyPipeline(device, graphicsPipeline, nullptr);
-    graphicsPipeline = VK_NULL_HANDLE;
-    vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    pipelineLayout = VK_NULL_HANDLE;
-    vkDestroyRenderPass(device, renderPass, nullptr);
-    renderPass = VK_NULL_HANDLE;
+    if (graphicsPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, graphicsPipeline, nullptr);
+        graphicsPipeline = VK_NULL_HANDLE;
+    }
+    if (pipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        pipelineLayout = VK_NULL_HANDLE;
+    }
+    if (renderPass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device, renderPass, nullptr);
+        renderPass = VK_NULL_HANDLE;
+    }
 
     for (auto imageView : swapchainImageViews) {
-        vkDestroyImageView(device, imageView, nullptr);
+        if (imageView != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, imageView, nullptr);
+        }
     }
     swapchainImageViews.clear();
 
-    vkDestroySwapchainKHR(device, swapchain, nullptr);
-    swapchain = VK_NULL_HANDLE;
+    if (swapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(device, swapchain, nullptr);
+        swapchain = VK_NULL_HANDLE;
+    }
     imagesInFlight.clear();
 }
 
@@ -2428,6 +2638,13 @@ void App::destroyUiVertexBuffer()
 
 void App::destroyUiVertexBuffer(size_t frameIndex)
 {
+    if (device == VK_NULL_HANDLE) {
+        vertexBuffers[frameIndex] = VK_NULL_HANDLE;
+        vertexBufferMemories[frameIndex] = VK_NULL_HANDLE;
+        vertexBufferCapacities[frameIndex] = 0;
+        return;
+    }
+
     if (vertexBuffers[frameIndex] != VK_NULL_HANDLE) {
         vkDestroyBuffer(device, vertexBuffers[frameIndex], nullptr);
         vertexBuffers[frameIndex] = VK_NULL_HANDLE;
@@ -2442,6 +2659,7 @@ void App::destroyUiVertexBuffer(size_t frameIndex)
 void App::uploadUiVertexBuffer(size_t frameIndex)
 {
     if (uiVertices.empty()) {
+        destroyUiVertexBuffer(frameIndex);
         return;
     }
 
@@ -2459,7 +2677,9 @@ void App::uploadUiVertexBuffer(size_t frameIndex)
     }
 
     void* data = nullptr;
-    vkMapMemory(device, vertexBufferMemories[frameIndex], 0, bufferSize, 0, &data);
+    if (vkMapMemory(device, vertexBufferMemories[frameIndex], 0, bufferSize, 0, &data) != VK_SUCCESS) {
+        throw std::runtime_error("failed to map UI vertex buffer memory");
+    }
     std::memcpy(data, uiVertices.data(), static_cast<size_t>(bufferSize));
     vkUnmapMemory(device, vertexBufferMemories[frameIndex]);
 }
@@ -3175,151 +3395,48 @@ ui::Rect App::panelRect(size_t visibleResultCount) const
 
 size_t App::visibleDesktopEntryCount() const
 {
-    return filteredDesktopEntries().size();
+    if (textFieldValue.empty()) {
+        return desktopEntries.size();
+    }
+
+    const std::string query = lowercase(textFieldValue);
+    return static_cast<size_t>(std::ranges::count_if(desktopEntries, [&query](const DesktopEntry& entry) {
+        return desktopEntryMatchesQuery(entry, query);
+    }));
 }
 
 std::vector<const DesktopEntry*> App::filteredDesktopEntries() const
 {
-    std::vector<const DesktopEntry*> entries;
     const std::string query = lowercase(textFieldValue);
-    if (query.empty()) {
-        for (const DesktopEntry* entry : orderedDesktopEntries()) {
-            entries.push_back(entry);
-        }
-    } else {
-        for (const auto& entry : desktopEntries) {
-            if (!desktopEntryMatchesQuery(entry, query)) {
-                continue;
-            }
-            entries.push_back(&entry);
-        }
-        const int64_t now = currentUnixTimestamp();
-        std::ranges::stable_sort(entries, [query, now](const DesktopEntry* left, const DesktopEntry* right) {
-            const int leftRank = desktopEntryMatchRank(*left, query);
-            const int rightRank = desktopEntryMatchRank(*right, query);
-            if (leftRank != rightRank) {
-                return leftRank < rightRank;
-            }
-            return desktopEntryOrderLessAt(left, right, now);
-        });
-    }
-    return entries;
+    return matchingDesktopEntryPointers(std::span{desktopEntries}, query);
 }
 
 std::vector<DesktopEntry*> App::visibleDesktopEntries()
 {
-    std::vector<DesktopEntry*> entries;
-    entries.reserve(maxVisibleDesktopEntries);
-
     const std::string query = lowercase(textFieldValue);
-    if (query.empty()) {
-        size_t matchIndex = 0;
-        for (DesktopEntry* entry : orderedDesktopEntries()) {
-            if (matchIndex++ < firstVisibleDesktopEntryIndex) {
-                continue;
-            }
-            entries.push_back(entry);
-            if (entries.size() == maxVisibleDesktopEntries) {
-                break;
-            }
-        }
-    } else {
-        std::vector<DesktopEntry*> matches;
-        for (auto& entry : desktopEntries) {
-            if (desktopEntryMatchesQuery(entry, query)) {
-                matches.push_back(&entry);
-            }
-        }
-        const int64_t now = currentUnixTimestamp();
-        std::ranges::stable_sort(matches, [query, now](const DesktopEntry* left, const DesktopEntry* right) {
-            const int leftRank = desktopEntryMatchRank(*left, query);
-            const int rightRank = desktopEntryMatchRank(*right, query);
-            if (leftRank != rightRank) {
-                return leftRank < rightRank;
-            }
-            return desktopEntryOrderLessAt(left, right, now);
-        });
-
-        size_t matchIndex = 0;
-        for (DesktopEntry* entry : matches) {
-            if (matchIndex++ < firstVisibleDesktopEntryIndex) {
-                continue;
-            }
-            entries.push_back(entry);
-            if (entries.size() == maxVisibleDesktopEntries) {
-                break;
-            }
-        }
-    }
-
-    return entries;
+    const std::vector<DesktopEntry*> entries = matchingDesktopEntryPointers(std::span{desktopEntries}, query);
+    return desktopEntrySlice(entries, firstVisibleDesktopEntryIndex, maxVisibleDesktopEntries);
 }
 
 std::vector<DesktopEntry*> App::orderedDesktopEntries()
 {
-    std::vector<DesktopEntry*> entries;
-    entries.reserve(desktopEntries.size());
-    for (auto& entry : desktopEntries) {
-        entries.push_back(&entry);
-    }
-
-    const int64_t now = currentUnixTimestamp();
-    std::ranges::stable_sort(entries, [now](const DesktopEntry* left, const DesktopEntry* right) {
-        return desktopEntryOrderLessAt(left, right, now);
-    });
-    return entries;
+    return matchingDesktopEntryPointers(std::span{desktopEntries}, std::string_view{});
 }
 
 std::vector<const DesktopEntry*> App::orderedDesktopEntries() const
 {
-    std::vector<const DesktopEntry*> entries;
-    entries.reserve(desktopEntries.size());
-    for (const auto& entry : desktopEntries) {
-        entries.push_back(&entry);
-    }
-
-    const int64_t now = currentUnixTimestamp();
-    std::ranges::stable_sort(entries, [now](const DesktopEntry* left, const DesktopEntry* right) {
-        return desktopEntryOrderLessAt(left, right, now);
-    });
-    return entries;
+    return matchingDesktopEntryPointers(std::span{desktopEntries}, std::string_view{});
 }
 
 DesktopEntry* App::selectedDesktopEntry()
 {
     const std::string query = lowercase(textFieldValue);
-    size_t matchIndex = 0;
-
-    if (query.empty()) {
-        for (DesktopEntry* entry : orderedDesktopEntries()) {
-            if (matchIndex++ == selectedDesktopEntryIndex) {
-                return entry;
-            }
-        }
-    } else {
-        std::vector<DesktopEntry*> matches;
-        for (auto& entry : desktopEntries) {
-            if (desktopEntryMatchesQuery(entry, query)) {
-                matches.push_back(&entry);
-            }
-        }
-        const int64_t now = currentUnixTimestamp();
-        std::ranges::stable_sort(matches, [query, now](const DesktopEntry* left, const DesktopEntry* right) {
-            const int leftRank = desktopEntryMatchRank(*left, query);
-            const int rightRank = desktopEntryMatchRank(*right, query);
-            if (leftRank != rightRank) {
-                return leftRank < rightRank;
-            }
-            return desktopEntryOrderLessAt(left, right, now);
-        });
-        for (DesktopEntry* entry : matches) {
-            if (matchIndex++ == selectedDesktopEntryIndex) {
-                return entry;
-            }
-        }
+    const std::vector<DesktopEntry*> entries = matchingDesktopEntryPointers(std::span{desktopEntries}, query);
+    if (selectedDesktopEntryIndex >= entries.size()) {
+        return nullptr;
     }
 
-    return nullptr;
+    return entries[selectedDesktopEntryIndex];
 }
 
 size_t App::textIndexAtPointer(float x) const
@@ -3591,7 +3708,7 @@ void App::rebuildUi()
                 itemRect.height,
             },
             entry.name,
-            lowercase(entry.name),
+            entry.searchNameText,
             query,
             desktopEntryText
         );
@@ -3681,10 +3798,21 @@ void App::rebuildUi()
     const auto vertices = canvas.vertices();
     uiVertices.assign(vertices.begin(), vertices.end());
 
+    const bool premultipliedSwapchain =
+        swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR ||
+        swapchainCompositeAlpha == VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    const auto applyVertexOpacity = [&](ui::Vertex& vertex, float opacity) {
+        if (premultipliedSwapchain) {
+            vertex.color.a *= opacity;
+        } else {
+            vertex.color = colorWithOpacity(vertex.color, opacity);
+        }
+    };
+
     for (const VertexOpacityRange& range : listEntryOpacityRanges) {
         const size_t end = std::min(range.end, uiVertices.size());
         for (size_t index = range.begin; index < end; ++index) {
-            uiVertices[index].color.a *= range.opacity;
+            applyVertexOpacity(uiVertices[index], range.opacity);
         }
     }
 
@@ -3696,14 +3824,20 @@ void App::rebuildUi()
                               std::max(static_cast<float>(swapchainExtent.height), 1.0f);
         for (ui::Vertex& vertex : uiVertices) {
             vertex.position.y += yOffset;
-            vertex.color.a *= opacity;
+            applyVertexOpacity(vertex, opacity);
         }
     }
 
     const float closeOpacity = closeFadeOutOpacity();
     if (closeOpacity < 1.0f) {
         for (ui::Vertex& vertex : uiVertices) {
-            vertex.color.a *= closeOpacity;
+            applyVertexOpacity(vertex, closeOpacity);
+        }
+    }
+
+    if (premultipliedSwapchain) {
+        for (ui::Vertex& vertex : uiVertices) {
+            vertex.color = premultipliedColor(vertex.color);
         }
     }
 }
@@ -3830,14 +3964,14 @@ VkPresentModeKHR App::chooseSwapPresentMode(const std::vector<VkPresentModeKHR>&
 
 VkCompositeAlphaFlagBitsKHR App::chooseCompositeAlpha(VkCompositeAlphaFlagsKHR supportedCompositeAlpha)
 {
-    if ((supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR) != 0) {
-        return VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
-    }
     if ((supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) != 0) {
         return VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
     }
     if ((supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) != 0) {
         return VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    }
+    if ((supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR) != 0) {
+        return VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
     }
 
     return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -3899,13 +4033,27 @@ void App::createBuffer(
     VkMemoryAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocateInfo.allocationSize = memoryRequirements.size;
-    allocateInfo.memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, properties);
+    try {
+        allocateInfo.memoryTypeIndex = findMemoryType(memoryRequirements.memoryTypeBits, properties);
+    } catch (...) {
+        vkDestroyBuffer(device, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
+        throw;
+    }
 
     if (vkAllocateMemory(device, &allocateInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+        vkDestroyBuffer(device, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
         throw std::runtime_error("failed to allocate buffer memory");
     }
 
-    vkBindBufferMemory(device, buffer, bufferMemory, 0);
+    if (vkBindBufferMemory(device, buffer, bufferMemory, 0) != VK_SUCCESS) {
+        vkFreeMemory(device, bufferMemory, nullptr);
+        vkDestroyBuffer(device, buffer, nullptr);
+        bufferMemory = VK_NULL_HANDLE;
+        buffer = VK_NULL_HANDLE;
+        throw std::runtime_error("failed to bind buffer memory");
+    }
 }
 
 void App::dispatchWaylandEvents(int timeoutMilliseconds)

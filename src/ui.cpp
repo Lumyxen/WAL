@@ -280,7 +280,8 @@ void Canvas::line(Vec2 from, Vec2 to, float thickness, Color color)
 
 void Canvas::bitmap(Rect rect, const Bitmap& bitmap)
 {
-    if (bitmap.width == 0 || bitmap.height == 0 || bitmap.pixels.size() < bitmap.width * bitmap.height) {
+    const size_t pixelCount = static_cast<size_t>(bitmap.width) * bitmap.height;
+    if (bitmap.width == 0 || bitmap.height == 0 || bitmap.pixels.size() < pixelCount) {
         return;
     }
 
@@ -494,6 +495,10 @@ Vec2 Canvas::toClipSpace(Vec2 point) const
 
 void Canvas::fillRect(Rect rect, Color color)
 {
+    if (rect.width <= 0.0f || rect.height <= 0.0f) {
+        return;
+    }
+
     const auto topLeft = toClipSpace({rect.x, rect.y});
     const auto topRight = toClipSpace({rect.x + rect.width, rect.y});
     const auto bottomRight = toClipSpace({rect.x + rect.width, rect.y + rect.height});
