@@ -2360,7 +2360,7 @@ void App::toggleSelectedDesktopEntryPin()
         entry->pinOrder = nextPinOrder;
     }
 
-    selectDesktopEntry(entry);
+    clampDesktopNavigation();
     savePinnedDesktopEntries();
     refreshUi();
 }
