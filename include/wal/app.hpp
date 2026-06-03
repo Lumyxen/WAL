@@ -46,6 +46,8 @@ struct DesktopEntry {
     bool iconLoaded = false;
     bool pinned = false;
     int pinOrder = -1;
+    double rankingScore = 0.0;
+    int64_t rankingUpdatedAt = 0;
 };
 
 class App {
@@ -175,6 +177,9 @@ private:
     void loadDesktopEntries();
     void loadPinnedDesktopEntries();
     void savePinnedDesktopEntries() const;
+    void loadDesktopEntryRankings();
+    void saveDesktopEntryRankings() const;
+    void recordDesktopEntryLaunch(DesktopEntry& entry);
     void setInputRegion();
     void initVulkan();
     void mainLoop();
@@ -222,7 +227,7 @@ private:
     void toggleSelectedDesktopEntryPin();
     void moveSelectedDesktopEntryPin(int delta);
     void launchSelectedDesktopEntry();
-    void launchDesktopEntry(const DesktopEntry& entry);
+    void launchDesktopEntry(DesktopEntry& entry);
     void selectDesktopEntry(const DesktopEntry* entry);
 
     [[nodiscard]] ui::Rect textFieldRect() const;

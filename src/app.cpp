@@ -18,6 +18,7 @@
 #include <limits>
 #include <poll.h>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
@@ -63,6 +64,8 @@ constexpr float desktopPinIconSize = 17.0f;
 constexpr float desktopPinTextGap = 10.0f;
 const ui::TextStyle desktopEntryText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 15.0f};
 const ui::Color desktopEntryMatchHighlight = ui::Color::srgb(0x3c, 0x48, 0x41);
+constexpr double desktopEntryRankingHalfLifeSeconds = 14.0 * 24.0 * 60.0 * 60.0;
+constexpr double desktopEntryRankingEpsilon = 0.0001;
 constexpr std::string_view pinIconSvg =
     R"(<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#d3c6aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>)";
 
@@ -169,7 +172,24 @@ int desktopEntryMatchRank(const DesktopEntry& entry, std::string_view query)
     return 2;
 }
 
-bool desktopEntryOrderLess(const DesktopEntry* left, const DesktopEntry* right)
+int64_t currentUnixTimestamp()
+{
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+}
+
+double desktopEntryRankingScore(const DesktopEntry& entry, int64_t now)
+{
+    if (entry.rankingScore <= 0.0 || entry.rankingUpdatedAt <= 0) {
+        return 0.0;
+    }
+
+    const double ageSeconds = static_cast<double>(std::max<int64_t>(now - entry.rankingUpdatedAt, 0));
+    return entry.rankingScore * std::pow(0.5, ageSeconds / desktopEntryRankingHalfLifeSeconds);
+}
+
+bool desktopEntryOrderLessAt(const DesktopEntry* left, const DesktopEntry* right, int64_t now)
 {
     if (left->pinned != right->pinned) {
         return left->pinned;
@@ -177,6 +197,13 @@ bool desktopEntryOrderLess(const DesktopEntry* left, const DesktopEntry* right)
     if (left->pinned && left->pinOrder != right->pinOrder) {
         return left->pinOrder < right->pinOrder;
     }
+
+    const double leftScore = desktopEntryRankingScore(*left, now);
+    const double rightScore = desktopEntryRankingScore(*right, now);
+    if (std::abs(leftScore - rightScore) > desktopEntryRankingEpsilon) {
+        return leftScore > rightScore;
+    }
+
     return left->name < right->name;
 }
 
@@ -364,6 +391,11 @@ std::filesystem::path stateDirectory()
 std::filesystem::path pinnedDesktopEntriesPath()
 {
     return stateDirectory() / "pinned-apps";
+}
+
+std::filesystem::path desktopEntryRankingsPath()
+{
+    return stateDirectory() / "app-rankings";
 }
 
 ui::Bitmap pixbufToBitmap(GdkPixbuf* pixbuf)
@@ -1124,6 +1156,7 @@ void App::loadDesktopEntries()
 
     std::ranges::sort(desktopEntries, {}, &DesktopEntry::name);
     loadPinnedDesktopEntries();
+    loadDesktopEntryRankings();
 }
 
 void App::loadPinnedDesktopEntries()
@@ -1174,6 +1207,83 @@ void App::savePinnedDesktopEntries() const
         }
         file << entry->name << '\n';
     }
+}
+
+void App::loadDesktopEntryRankings()
+{
+    for (auto& entry : desktopEntries) {
+        entry.rankingScore = 0.0;
+        entry.rankingUpdatedAt = 0;
+    }
+
+    std::ifstream file(desktopEntryRankingsPath());
+    if (!file) {
+        return;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty()) {
+            continue;
+        }
+
+        const size_t firstTab = line.find('\t');
+        if (firstTab == std::string::npos) {
+            continue;
+        }
+        const size_t secondTab = line.find('\t', firstTab + 1);
+        if (secondTab == std::string::npos) {
+            continue;
+        }
+
+        double score = 0.0;
+        int64_t updatedAt = 0;
+        std::istringstream valueStream(line.substr(0, secondTab));
+        valueStream >> score >> updatedAt;
+        if (!valueStream || score <= 0.0 || updatedAt <= 0) {
+            continue;
+        }
+
+        const std::string name = line.substr(secondTab + 1);
+        for (auto& entry : desktopEntries) {
+            if (entry.name == name) {
+                entry.rankingScore = score;
+                entry.rankingUpdatedAt = updatedAt;
+                break;
+            }
+        }
+    }
+}
+
+void App::saveDesktopEntryRankings() const
+{
+    std::error_code error;
+    std::filesystem::create_directories(stateDirectory(), error);
+    if (error) {
+        return;
+    }
+
+    std::ofstream file(desktopEntryRankingsPath());
+    if (!file) {
+        return;
+    }
+
+    const int64_t now = currentUnixTimestamp();
+    for (const DesktopEntry* entry : orderedDesktopEntries()) {
+        const double score = desktopEntryRankingScore(*entry, now);
+        if (score <= desktopEntryRankingEpsilon) {
+            continue;
+        }
+        file << score << '\t' << now << '\t' << entry->name << '\n';
+    }
+}
+
+void App::recordDesktopEntryLaunch(DesktopEntry& entry)
+{
+    const int64_t now = currentUnixTimestamp();
+    entry.rankingScore = desktopEntryRankingScore(entry, now) + 1.0;
+    entry.rankingUpdatedAt = now;
+    saveDesktopEntryRankings();
 }
 
 void App::setInputRegion()
@@ -2404,12 +2514,12 @@ void App::moveSelectedDesktopEntryPin(int delta)
 
 void App::launchSelectedDesktopEntry()
 {
-    const std::vector<const DesktopEntry*> entries = filteredDesktopEntries();
-    if (selectedDesktopEntryIndex >= entries.size()) {
+    DesktopEntry* entry = selectedDesktopEntry();
+    if (entry == nullptr) {
         return;
     }
 
-    launchDesktopEntry(*entries[selectedDesktopEntryIndex]);
+    launchDesktopEntry(*entry);
 }
 
 void App::selectDesktopEntry(const DesktopEntry* entry)
@@ -2429,7 +2539,7 @@ void App::selectDesktopEntry(const DesktopEntry* entry)
     clampDesktopNavigation();
 }
 
-void App::launchDesktopEntry(const DesktopEntry& entry)
+void App::launchDesktopEntry(DesktopEntry& entry)
 {
     if (entry.execCommand.empty()) {
         return;
@@ -2452,6 +2562,7 @@ void App::launchDesktopEntry(const DesktopEntry& entry)
     }
 
     if (pid > 0) {
+        recordDesktopEntryLaunch(entry);
         running = false;
     }
 }
@@ -2563,13 +2674,14 @@ std::vector<const DesktopEntry*> App::filteredDesktopEntries() const
             }
             entries.push_back(&entry);
         }
-        std::ranges::stable_sort(entries, [query](const DesktopEntry* left, const DesktopEntry* right) {
+        const int64_t now = currentUnixTimestamp();
+        std::ranges::stable_sort(entries, [query, now](const DesktopEntry* left, const DesktopEntry* right) {
             const int leftRank = desktopEntryMatchRank(*left, query);
             const int rightRank = desktopEntryMatchRank(*right, query);
             if (leftRank != rightRank) {
                 return leftRank < rightRank;
             }
-            return desktopEntryOrderLess(left, right);
+            return desktopEntryOrderLessAt(left, right, now);
         });
     }
     return entries;
@@ -2599,13 +2711,14 @@ std::vector<DesktopEntry*> App::visibleDesktopEntries()
                 matches.push_back(&entry);
             }
         }
-        std::ranges::stable_sort(matches, [query](const DesktopEntry* left, const DesktopEntry* right) {
+        const int64_t now = currentUnixTimestamp();
+        std::ranges::stable_sort(matches, [query, now](const DesktopEntry* left, const DesktopEntry* right) {
             const int leftRank = desktopEntryMatchRank(*left, query);
             const int rightRank = desktopEntryMatchRank(*right, query);
             if (leftRank != rightRank) {
                 return leftRank < rightRank;
             }
-            return desktopEntryOrderLess(left, right);
+            return desktopEntryOrderLessAt(left, right, now);
         });
 
         size_t matchIndex = 0;
@@ -2631,7 +2744,10 @@ std::vector<DesktopEntry*> App::orderedDesktopEntries()
         entries.push_back(&entry);
     }
 
-    std::ranges::stable_sort(entries, desktopEntryOrderLess);
+    const int64_t now = currentUnixTimestamp();
+    std::ranges::stable_sort(entries, [now](const DesktopEntry* left, const DesktopEntry* right) {
+        return desktopEntryOrderLessAt(left, right, now);
+    });
     return entries;
 }
 
@@ -2643,7 +2759,10 @@ std::vector<const DesktopEntry*> App::orderedDesktopEntries() const
         entries.push_back(&entry);
     }
 
-    std::ranges::stable_sort(entries, desktopEntryOrderLess);
+    const int64_t now = currentUnixTimestamp();
+    std::ranges::stable_sort(entries, [now](const DesktopEntry* left, const DesktopEntry* right) {
+        return desktopEntryOrderLessAt(left, right, now);
+    });
     return entries;
 }
 
@@ -2665,13 +2784,14 @@ DesktopEntry* App::selectedDesktopEntry()
                 matches.push_back(&entry);
             }
         }
-        std::ranges::stable_sort(matches, [query](const DesktopEntry* left, const DesktopEntry* right) {
+        const int64_t now = currentUnixTimestamp();
+        std::ranges::stable_sort(matches, [query, now](const DesktopEntry* left, const DesktopEntry* right) {
             const int leftRank = desktopEntryMatchRank(*left, query);
             const int rightRank = desktopEntryMatchRank(*right, query);
             if (leftRank != rightRank) {
                 return leftRank < rightRank;
             }
-            return desktopEntryOrderLess(left, right);
+            return desktopEntryOrderLessAt(left, right, now);
         });
         for (DesktopEntry* entry : matches) {
             if (matchIndex++ == selectedDesktopEntryIndex) {
