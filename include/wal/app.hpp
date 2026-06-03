@@ -92,6 +92,22 @@ private:
     std::optional<uint32_t> repeatingKey;
     std::chrono::steady_clock::time_point backgroundTintFadeStart;
     std::chrono::steady_clock::time_point mainMenuAnimationStart;
+    std::chrono::steady_clock::time_point listAnimationStart;
+    std::chrono::steady_clock::time_point listScrollAnimationStart;
+    std::chrono::steady_clock::time_point selectionHighlightAnimationStart;
+    float listAnimationStartVisibleCount = 0.0f;
+    size_t listAnimationTargetVisibleCount = 0;
+    float listAnimationStartPanelY = 0.0f;
+    float listAnimationTargetPanelY = 0.0f;
+    float listAnimationStartPanelHeight = 0.0f;
+    float listAnimationTargetPanelHeight = 0.0f;
+    std::vector<const DesktopEntry*> listAnimationPreviousVisibleEntries;
+    std::vector<const DesktopEntry*> lastAnimatedVisibleEntries;
+    size_t lastAnimatedFirstVisibleDesktopEntryIndex = 0;
+    size_t lastAnimatedSelectedDesktopEntryIndex = 0;
+    float listScrollAnimationStartOffset = 0.0f;
+    float selectionHighlightAnimationStartY = 0.0f;
+    float selectionHighlightAnimationTargetY = 0.0f;
 
     VkInstance instance = VK_NULL_HANDLE;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -257,7 +273,16 @@ private:
     [[nodiscard]] float mainMenuFadeProgress() const;
     [[nodiscard]] float mainMenuSlideProgress() const;
     [[nodiscard]] float listPopulationProgress() const;
-    [[nodiscard]] float listEntryPopulationProgress(size_t entryIndex) const;
+    [[nodiscard]] bool listPopulationAnimationActive() const;
+    [[nodiscard]] float animatedVisibleListCount() const;
+    [[nodiscard]] float animatedPanelY() const;
+    [[nodiscard]] float animatedPanelHeight() const;
+    [[nodiscard]] float listScrollProgress() const;
+    [[nodiscard]] bool listScrollAnimationActive() const;
+    [[nodiscard]] float animatedListScrollOffset() const;
+    [[nodiscard]] float selectionHighlightProgress() const;
+    [[nodiscard]] bool selectionHighlightAnimationActive() const;
+    [[nodiscard]] float animatedSelectionHighlightY() const;
     [[nodiscard]] bool mainMenuAnimationActive() const;
 
     [[nodiscard]] VkShaderModule createShaderModule(const std::vector<char>& code);

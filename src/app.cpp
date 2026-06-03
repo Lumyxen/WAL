@@ -49,7 +49,9 @@ constexpr std::chrono::milliseconds backgroundTintFadeDuration{175};
 constexpr std::chrono::milliseconds mainMenuFadeDuration{150};
 constexpr std::chrono::milliseconds mainMenuSlideDuration{225};
 constexpr std::chrono::milliseconds listPopulationDuration{225};
-constexpr std::chrono::milliseconds listEntryFadeDuration{70};
+constexpr std::chrono::milliseconds listScrollDuration{150};
+constexpr std::chrono::milliseconds selectionHighlightSlideDuration{75};
+constexpr float listEdgeFadeDistance = 5.0f;
 constexpr float mainMenuAnimationOffsetPixels = 14.0f;
 constexpr int animationFrameTimeoutMilliseconds = 1;
 
@@ -1328,6 +1330,9 @@ void App::initVulkan()
     const auto animationStart = std::chrono::steady_clock::now();
     backgroundTintFadeStart = animationStart;
     mainMenuAnimationStart = animationStart;
+    listAnimationStart = animationStart;
+    listScrollAnimationStart = animationStart;
+    selectionHighlightAnimationStart = animationStart;
     createUiVertexBuffer();
     createCommandBuffers();
     createSyncObjects();
@@ -1337,12 +1342,16 @@ void App::mainLoop()
 {
     bool needsFrame = true;
     while (running) {
-        if (needsFrame || uiDirty || backgroundTintFadeActive() || mainMenuAnimationActive()) {
+        if (needsFrame || uiDirty || backgroundTintFadeActive() || mainMenuAnimationActive() ||
+            listPopulationAnimationActive() || listScrollAnimationActive() || selectionHighlightAnimationActive()) {
             drawFrame();
             needsFrame = false;
         }
         dispatchWaylandEvents(
-            backgroundTintFadeActive() || mainMenuAnimationActive() ? animationFrameTimeoutMilliseconds : -1
+            backgroundTintFadeActive() || mainMenuAnimationActive() || listPopulationAnimationActive() ||
+                    listScrollAnimationActive() || selectionHighlightAnimationActive()
+                ? animationFrameTimeoutMilliseconds
+                : -1
         );
     }
 
@@ -1858,27 +1867,80 @@ float App::mainMenuSlideProgress() const
 
 float App::listPopulationProgress() const
 {
-    const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
+    const auto elapsed = std::chrono::steady_clock::now() - listAnimationStart;
     const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
     const auto durationSeconds = std::chrono::duration<float>(listPopulationDuration).count();
     const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
     return progress * progress * (3.0f - 2.0f * progress);
 }
 
-float App::listEntryPopulationProgress(size_t entryIndex) const
+bool App::listPopulationAnimationActive() const
 {
-    if (entryIndex >= maxVisibleDesktopEntries) {
-        return 1.0f;
-    }
+    return std::chrono::steady_clock::now() - listAnimationStart <
+           listPopulationDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+}
 
-    const auto elapsed = std::chrono::steady_clock::now() - mainMenuAnimationStart;
+float App::animatedVisibleListCount() const
+{
+    const float progress = listPopulationProgress();
+    return listAnimationStartVisibleCount +
+           (static_cast<float>(listAnimationTargetVisibleCount) - listAnimationStartVisibleCount) * progress;
+}
+
+float App::animatedPanelY() const
+{
+    const float progress = listPopulationProgress();
+    return listAnimationStartPanelY + (listAnimationTargetPanelY - listAnimationStartPanelY) * progress;
+}
+
+float App::animatedPanelHeight() const
+{
+    const float progress = listPopulationProgress();
+    return listAnimationStartPanelHeight +
+           (listAnimationTargetPanelHeight - listAnimationStartPanelHeight) * progress;
+}
+
+float App::listScrollProgress() const
+{
+    const auto elapsed = std::chrono::steady_clock::now() - listScrollAnimationStart;
     const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
-    const auto fadeSeconds = std::chrono::duration<float>(listEntryFadeDuration).count();
-    const auto totalSeconds = std::chrono::duration<float>(listPopulationDuration).count();
-    const float staggerSeconds = (totalSeconds - fadeSeconds) / static_cast<float>(maxVisibleDesktopEntries - 1);
-    const float entryStartSeconds = static_cast<float>(entryIndex) * staggerSeconds;
-    const float progress = std::clamp((elapsedSeconds - entryStartSeconds) / fadeSeconds, 0.0f, 1.0f);
+    const auto durationSeconds = std::chrono::duration<float>(listScrollDuration).count();
+    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
+    const float remaining = 1.0f - progress;
+    return 1.0f - remaining * remaining * remaining;
+}
+
+bool App::listScrollAnimationActive() const
+{
+    return std::chrono::steady_clock::now() - listScrollAnimationStart <
+           listScrollDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+}
+
+float App::animatedListScrollOffset() const
+{
+    return listScrollAnimationStartOffset * (1.0f - listScrollProgress());
+}
+
+float App::selectionHighlightProgress() const
+{
+    const auto elapsed = std::chrono::steady_clock::now() - selectionHighlightAnimationStart;
+    const auto elapsedSeconds = std::chrono::duration<float>(elapsed).count();
+    const auto durationSeconds = std::chrono::duration<float>(selectionHighlightSlideDuration).count();
+    const float progress = std::clamp(elapsedSeconds / durationSeconds, 0.0f, 1.0f);
     return progress * progress * (3.0f - 2.0f * progress);
+}
+
+bool App::selectionHighlightAnimationActive() const
+{
+    return std::chrono::steady_clock::now() - selectionHighlightAnimationStart <
+           selectionHighlightSlideDuration + std::chrono::milliseconds{animationFrameTimeoutMilliseconds};
+}
+
+float App::animatedSelectionHighlightY() const
+{
+    const float progress = selectionHighlightProgress();
+    return selectionHighlightAnimationStartY +
+           (selectionHighlightAnimationTargetY - selectionHighlightAnimationStartY) * progress;
 }
 
 bool App::mainMenuAnimationActive() const
@@ -1945,7 +2007,8 @@ void App::drawFrame()
     }
 
     const bool wasUiDirty = uiDirty;
-    if (uiDirty || mainMenuAnimationActive()) {
+    if (uiDirty || mainMenuAnimationActive() || listPopulationAnimationActive() || listScrollAnimationActive() ||
+        selectionHighlightAnimationActive()) {
         rebuildUi();
         uiDirty = false;
     }
@@ -2992,19 +3055,78 @@ void App::rebuildUi()
 
     ui::Canvas canvas(static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height));
     const std::string query = lowercase(textFieldValue);
+    const ui::ListStyle listStyle = desktopListStyle();
+    const auto listEntryVisibilityAtPanelHeight = [&](size_t row, float panelHeight) {
+        const float entryBottom = panelPadding + textFieldHeight + listTopGap + listStyle.padding +
+                                  static_cast<float>(row) * (listStyle.itemHeight + listStyle.itemGap) +
+                                  listStyle.itemHeight;
+        const float fadeDistance = std::max(panelPadding + listStyle.padding, 1.0f);
+        const float progress = std::clamp((panelHeight - entryBottom) / fadeDistance, 0.0f, 1.0f);
+        return progress * progress * (3.0f - 2.0f * progress);
+    };
 
     const std::vector<DesktopEntry*> visibleEntries = visibleDesktopEntries();
+    std::vector<const DesktopEntry*> currentVisibleEntries;
+    currentVisibleEntries.reserve(visibleEntries.size());
+    for (const DesktopEntry* entry : visibleEntries) {
+        currentVisibleEntries.push_back(entry);
+    }
     const ui::Rect panel = panelRect(visibleEntries.size());
-    ui::Rect renderedPanel = panel;
-    if (!visibleEntries.empty()) {
+    if (lastAnimatedVisibleEntries != currentVisibleEntries) {
         const ui::Rect collapsedPanel = panelRect(0);
-        const float listProgress = listPopulationProgress();
-        renderedPanel.height = collapsedPanel.height + (panel.height - collapsedPanel.height) * listProgress;
+        const bool hasPanelAnimationTarget = listAnimationTargetPanelHeight > 0.0f;
+        const float currentPanelY = hasPanelAnimationTarget ? animatedPanelY() : panel.y;
+        const float currentPanelHeight = listAnimationTargetPanelHeight > 0.0f
+            ? animatedPanelHeight()
+            : collapsedPanel.height;
+        const float currentVisibleCount = animatedVisibleListCount();
+        std::vector<const DesktopEntry*> currentVisualEntries;
+        if (hasPanelAnimationTarget) {
+            const size_t visualRowCount = std::min(
+                std::max(lastAnimatedVisibleEntries.size(), listAnimationPreviousVisibleEntries.size()),
+                maxVisibleDesktopEntries
+            );
+            currentVisualEntries.reserve(visualRowCount);
+            for (size_t row = 0; row < visualRowCount; ++row) {
+                const DesktopEntry* targetEntry =
+                    row < lastAnimatedVisibleEntries.size() ? lastAnimatedVisibleEntries[row] : nullptr;
+                const DesktopEntry* outgoingEntry =
+                    row < listAnimationPreviousVisibleEntries.size() ? listAnimationPreviousVisibleEntries[row] : nullptr;
+                if (targetEntry != nullptr) {
+                    currentVisualEntries.push_back(targetEntry);
+                } else if (outgoingEntry != nullptr && listEntryVisibilityAtPanelHeight(row, currentPanelHeight) > 0.0f) {
+                    currentVisualEntries.push_back(outgoingEntry);
+                } else {
+                    currentVisualEntries.push_back(nullptr);
+                }
+            }
+        }
+
+        listAnimationStart = std::chrono::steady_clock::now();
+        listAnimationStartVisibleCount = currentVisibleCount;
+        listAnimationTargetVisibleCount = std::min(visibleEntries.size(), maxVisibleDesktopEntries);
+        listAnimationStartPanelY = currentPanelY;
+        listAnimationTargetPanelY = panel.y;
+        listAnimationStartPanelHeight = currentPanelHeight;
+        listAnimationTargetPanelHeight = panel.height;
+        listAnimationPreviousVisibleEntries = hasPanelAnimationTarget ? std::move(currentVisualEntries) : lastAnimatedVisibleEntries;
+        lastAnimatedVisibleEntries = std::move(currentVisibleEntries);
+    }
+
+    ui::Rect renderedPanel = panel;
+    if (listPopulationAnimationActive()) {
+        renderedPanel.y = animatedPanelY();
+        renderedPanel.height = animatedPanelHeight();
     }
 
     canvas.box(renderedPanel, {.fill = panelFill, .border = panelBorder, .borderWidth = 1.0f});
 
-    const ui::Rect textField = textFieldRect();
+    const ui::Rect textField{
+        renderedPanel.x + panelPadding,
+        renderedPanel.y + panelPadding,
+        renderedPanel.width - panelPadding * 2.0f,
+        textFieldHeight,
+    };
     canvas.textField(
         textField,
         textFieldValue,
@@ -3026,84 +3148,229 @@ void App::rebuildUi()
     };
     std::vector<VertexOpacityRange> listEntryOpacityRanges;
 
-    if (!visibleEntries.empty()) {
-        const ui::ListStyle listStyle = desktopListStyle();
-        const ui::Rect listRect = desktopListRect();
-        float y = listRect.y + listStyle.padding;
-        for (size_t i = 0; i < visibleEntries.size(); ++i) {
-            const size_t entryVertexBegin = canvas.vertexCount();
-            DesktopEntry& entry = *visibleEntries[i];
-            if (!entry.iconLoaded) {
-                entry.icon = loadIconBitmap(entry.iconName);
-                entry.iconLoaded = true;
+    const float listX = renderedPanel.x + panelPadding;
+    const float listY = textField.y + textField.height + listTopGap;
+    const float listWidth = renderedPanel.width - panelPadding * 2.0f;
+    const bool listAnimating = listPopulationAnimationActive();
+    const float rowStride = listStyle.itemHeight + listStyle.itemGap;
+    if (lastAnimatedFirstVisibleDesktopEntryIndex != firstVisibleDesktopEntryIndex) {
+        const float currentOffset = listScrollAnimationActive() ? animatedListScrollOffset() : 0.0f;
+        const auto previousFirst = static_cast<int64_t>(lastAnimatedFirstVisibleDesktopEntryIndex);
+        const auto nextFirst = static_cast<int64_t>(firstVisibleDesktopEntryIndex);
+        const float requestedOffset = currentOffset + static_cast<float>(nextFirst - previousFirst) * rowStride;
+        const float maxScrollAnimationOffset = rowStride * static_cast<float>(maxVisibleDesktopEntries);
+        listScrollAnimationStartOffset = std::clamp(
+            requestedOffset,
+            -maxScrollAnimationOffset,
+            maxScrollAnimationOffset
+        );
+        listScrollAnimationStart = std::chrono::steady_clock::now();
+        lastAnimatedFirstVisibleDesktopEntryIndex = firstVisibleDesktopEntryIndex;
+    }
+    const float scrollOffset = listScrollAnimationActive() ? animatedListScrollOffset() : 0.0f;
+
+    const auto finalRowY = [&](size_t row) {
+        return listY + listStyle.padding + static_cast<float>(row) * rowStride;
+    };
+    const auto rowY = [&](size_t row) {
+        return listY + listStyle.padding + static_cast<float>(row) * rowStride + scrollOffset;
+    };
+    const auto smoothStep = [](float progress) {
+        progress = std::clamp(progress, 0.0f, 1.0f);
+        return progress * progress * (3.0f - 2.0f * progress);
+    };
+    const auto listEdgeOpacity = [&](float y) {
+        const float listTop = listY + listStyle.padding;
+        const float listBottom = renderedPanel.y + renderedPanel.height - panelPadding - listStyle.padding;
+        const float topOpacity = smoothStep((y - (listTop - listEdgeFadeDistance)) / listEdgeFadeDistance);
+        const float bottomOpacity = smoothStep(
+            (listBottom + listEdgeFadeDistance - y - listStyle.itemHeight) / listEdgeFadeDistance
+        );
+        return std::min(topOpacity, bottomOpacity);
+    };
+
+    const bool hasSelectedRow = selectedDesktopEntryIndex >= firstVisibleDesktopEntryIndex &&
+                                selectedDesktopEntryIndex < firstVisibleDesktopEntryIndex + maxVisibleDesktopEntries &&
+                                selectedDesktopEntryIndex < visibleDesktopEntryCount();
+    const size_t selectedRow = hasSelectedRow ? selectedDesktopEntryIndex - firstVisibleDesktopEntryIndex : 0;
+    if (hasSelectedRow) {
+        const float targetY = finalRowY(selectedRow);
+        if (lastAnimatedSelectedDesktopEntryIndex != selectedDesktopEntryIndex) {
+            float startY = targetY;
+            if (listScrollAnimationActive()) {
+                startY = targetY;
+            } else if (selectionHighlightAnimationActive()) {
+                startY = animatedSelectionHighlightY();
+            } else if (lastAnimatedSelectedDesktopEntryIndex >= firstVisibleDesktopEntryIndex &&
+                       lastAnimatedSelectedDesktopEntryIndex < firstVisibleDesktopEntryIndex + maxVisibleDesktopEntries) {
+                startY = finalRowY(lastAnimatedSelectedDesktopEntryIndex - firstVisibleDesktopEntryIndex);
+            }
+            selectionHighlightAnimationStartY = startY;
+            selectionHighlightAnimationTargetY = targetY;
+            selectionHighlightAnimationStart = std::chrono::steady_clock::now();
+            lastAnimatedSelectedDesktopEntryIndex = selectedDesktopEntryIndex;
+        } else if (!selectionHighlightAnimationActive()) {
+            selectionHighlightAnimationStartY = targetY;
+            selectionHighlightAnimationTargetY = targetY;
+        }
+
+        const float highlightTop = listY + listStyle.padding;
+        const float highlightBottom = renderedPanel.y + renderedPanel.height - panelPadding - listStyle.itemHeight;
+        const float rawHighlightY = listScrollAnimationActive()
+            ? targetY
+            : (selectionHighlightAnimationActive() ? animatedSelectionHighlightY() : targetY);
+        const float highlightY = std::clamp(
+            rawHighlightY,
+            highlightTop,
+            std::max(highlightTop, highlightBottom)
+        );
+        canvas.box(
+            {listX + listStyle.padding, highlightY, listWidth - listStyle.padding * 2.0f, listStyle.itemHeight},
+            {.fill = listStyle.selectedFill, .borderWidth = 0.0f}
+        );
+    }
+
+    const auto drawEntry = [&](const DesktopEntry* entryPointer, size_t row, float y, float opacity) {
+        opacity *= listEdgeOpacity(y);
+        if (entryPointer == nullptr || opacity <= 0.0f) {
+            return;
+        }
+
+        const size_t entryVertexBegin = canvas.vertexCount();
+        DesktopEntry& entry = *const_cast<DesktopEntry*>(entryPointer);
+        if (!entry.iconLoaded) {
+            entry.icon = loadIconBitmap(entry.iconName);
+            entry.iconLoaded = true;
+        }
+
+        const ui::Rect itemRect{
+            listX + listStyle.padding,
+            y,
+            listWidth - listStyle.padding * 2.0f,
+            listStyle.itemHeight,
+        };
+
+        float contentX = itemRect.x + 8.0f;
+        if (multiLaunchMode) {
+            const float markerY = itemRect.y + (itemRect.height - multiLaunchMarkerSize) * 0.5f;
+            const ui::Rect markerRect{contentX, markerY, multiLaunchMarkerSize, multiLaunchMarkerSize};
+            canvas.box(markerRect, {.fill = transparent, .border = multiLaunchMarkerBorder, .borderWidth = 1.0f});
+            if (isMultiLaunchEntrySelected(&entry)) {
+                canvas.box(
+                    {markerRect.x + 4.0f, markerRect.y + 4.0f, markerRect.width - 8.0f, markerRect.height - 8.0f},
+                    {.fill = multiLaunchMarkerFill, .borderWidth = 0.0f}
+                );
+            }
+            contentX += multiLaunchMarkerSize + multiLaunchMarkerTextGap;
+        }
+
+        const float iconY = itemRect.y + (itemRect.height - desktopIconSize) * 0.5f;
+        const ui::Rect iconRect{contentX, iconY, desktopIconSize, desktopIconSize};
+        if (!entry.icon.pixels.empty()) {
+            canvas.bitmap(iconRect, entry.icon);
+        }
+
+        const float textX = iconRect.x + iconRect.width + desktopIconTextGap;
+        const float pinIconX = itemRect.x + itemRect.width - 8.0f - desktopPinIconSize;
+        const float textWidth = std::max(
+            entry.pinned
+                ? itemRect.x + itemRect.width - textX - desktopPinIconSize - desktopPinTextGap - 8.0f
+                : itemRect.x + itemRect.width - textX - 8.0f,
+            0.0f
+        );
+        drawHighlightedText(
+            canvas,
+            {
+                textX,
+                itemRect.y,
+                textWidth,
+                itemRect.height,
+            },
+            entry.name,
+            lowercase(entry.name),
+            query,
+            desktopEntryText
+        );
+        if (entry.pinned) {
+            const float pinIconY = itemRect.y + (itemRect.height - desktopPinIconSize) * 0.5f;
+            canvas.bitmap({pinIconX, pinIconY, desktopPinIconSize, desktopPinIconSize}, pinIconBitmap());
+        }
+
+        const size_t entryVertexEnd = canvas.vertexCount();
+        if (opacity < 1.0f) {
+            listEntryOpacityRanges.push_back({
+                .begin = entryVertexBegin,
+                .end = entryVertexEnd,
+                .opacity = opacity,
+            });
+        }
+    };
+
+    const auto drawEntryAtRow = [&](const DesktopEntry* entryPointer, size_t row, float opacity) {
+        drawEntry(entryPointer, row, rowY(row), opacity);
+    };
+
+    const size_t transitionRowCount = listAnimating
+        ? std::min(
+              std::max(visibleEntries.size(), listAnimationPreviousVisibleEntries.size()),
+              maxVisibleDesktopEntries
+          )
+        : std::min(visibleEntries.size(), maxVisibleDesktopEntries);
+
+    if (listScrollAnimationActive()) {
+        const std::vector<const DesktopEntry*> filteredEntries = filteredDesktopEntries();
+        const size_t scrollBufferRows =
+            static_cast<size_t>(std::ceil(std::abs(scrollOffset) / rowStride)) + 1;
+        const size_t firstBufferedIndex = firstVisibleDesktopEntryIndex > scrollBufferRows
+            ? firstVisibleDesktopEntryIndex - scrollBufferRows
+            : 0;
+        const size_t lastBufferedIndex = std::min(
+            filteredEntries.size(),
+            firstVisibleDesktopEntryIndex + maxVisibleDesktopEntries + scrollBufferRows
+        );
+        for (size_t entryIndex = firstBufferedIndex; entryIndex < lastBufferedIndex; ++entryIndex) {
+            const auto relativeRow = static_cast<int64_t>(entryIndex) -
+                                     static_cast<int64_t>(firstVisibleDesktopEntryIndex);
+            const float y = finalRowY(0) + static_cast<float>(relativeRow) * rowStride + scrollOffset;
+            const float heightOpacity = listAnimating
+                ? listEntryVisibilityAtPanelHeight(
+                      static_cast<size_t>(std::max(
+                          static_cast<int>(std::floor((y - finalRowY(0)) / rowStride)),
+                          0
+                      )),
+                      renderedPanel.height
+                  )
+                : 1.0f;
+            drawEntry(filteredEntries[entryIndex], 0, y, heightOpacity);
+        }
+    } else {
+        for (size_t row = 0; row < transitionRowCount; ++row) {
+            const DesktopEntry* currentEntry = row < visibleEntries.size() ? visibleEntries[row] : nullptr;
+            const DesktopEntry* previousEntry =
+                listAnimating && row < listAnimationPreviousVisibleEntries.size()
+                    ? listAnimationPreviousVisibleEntries[row]
+                    : nullptr;
+            if (!listAnimating) {
+                drawEntryAtRow(currentEntry, row, 1.0f);
+                continue;
             }
 
-            const ui::Rect itemRect{
-                listRect.x + listStyle.padding,
-                y,
-                listRect.width - listStyle.padding * 2.0f,
-                listStyle.itemHeight,
-            };
-            if (firstVisibleDesktopEntryIndex + i == selectedDesktopEntryIndex) {
-                canvas.box(itemRect, {.fill = listStyle.selectedFill, .borderWidth = 0.0f});
+            if (previousEntry == currentEntry) {
+                drawEntryAtRow(currentEntry, row, listEntryVisibilityAtPanelHeight(row, renderedPanel.height));
+                continue;
             }
 
-            float contentX = itemRect.x + 8.0f;
-            if (multiLaunchMode) {
-                const float markerY = itemRect.y + (itemRect.height - multiLaunchMarkerSize) * 0.5f;
-                const ui::Rect markerRect{contentX, markerY, multiLaunchMarkerSize, multiLaunchMarkerSize};
-                canvas.box(markerRect, {.fill = transparent, .border = multiLaunchMarkerBorder, .borderWidth = 1.0f});
-                if (isMultiLaunchEntrySelected(&entry)) {
-                    canvas.box(
-                        {markerRect.x + 4.0f, markerRect.y + 4.0f, markerRect.width - 8.0f, markerRect.height - 8.0f},
-                        {.fill = multiLaunchMarkerFill, .borderWidth = 0.0f}
-                    );
-                }
-                contentX += multiLaunchMarkerSize + multiLaunchMarkerTextGap;
+            if (previousEntry != nullptr && currentEntry != nullptr) {
+                drawEntryAtRow(currentEntry, row, 1.0f);
+                continue;
             }
 
-            const float iconY = itemRect.y + (itemRect.height - desktopIconSize) * 0.5f;
-            const ui::Rect iconRect{contentX, iconY, desktopIconSize, desktopIconSize};
-            if (!entry.icon.pixels.empty()) {
-                canvas.bitmap(iconRect, entry.icon);
+            if (previousEntry != nullptr) {
+                drawEntryAtRow(previousEntry, row, listEntryVisibilityAtPanelHeight(row, renderedPanel.height));
+                continue;
             }
 
-            const float textX = iconRect.x + iconRect.width + desktopIconTextGap;
-            const float pinIconX = itemRect.x + itemRect.width - 8.0f - desktopPinIconSize;
-            const float textWidth = std::max(
-                entry.pinned
-                    ? itemRect.x + itemRect.width - textX - desktopPinIconSize - desktopPinTextGap - 8.0f
-                    : itemRect.x + itemRect.width - textX - 8.0f,
-                0.0f
-            );
-            drawHighlightedText(
-                canvas,
-                {
-                    textX,
-                    itemRect.y,
-                    textWidth,
-                    itemRect.height,
-                },
-                entry.name,
-                lowercase(entry.name),
-                query,
-                desktopEntryText
-            );
-            if (entry.pinned) {
-                const float pinIconY = itemRect.y + (itemRect.height - desktopPinIconSize) * 0.5f;
-                canvas.bitmap({pinIconX, pinIconY, desktopPinIconSize, desktopPinIconSize}, pinIconBitmap());
-            }
-
-            y += listStyle.itemHeight + listStyle.itemGap;
-            const size_t entryVertexEnd = canvas.vertexCount();
-            const float entryOpacity = listEntryPopulationProgress(i);
-            if (entryOpacity < 1.0f) {
-                listEntryOpacityRanges.push_back({
-                    .begin = entryVertexBegin,
-                    .end = entryVertexEnd,
-                    .opacity = entryOpacity,
-                });
-            }
+            drawEntryAtRow(currentEntry, row, listEntryVisibilityAtPanelHeight(row, renderedPanel.height));
         }
     }
 
