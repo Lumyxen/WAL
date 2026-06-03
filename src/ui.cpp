@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <fontconfig/fontconfig.h>
@@ -22,9 +24,23 @@ struct FcPatternDeleter {
     }
 };
 
+struct FcFontSetDeleter {
+    void operator()(FcFontSet* set) const
+    {
+        if (set != nullptr) {
+            FcFontSetDestroy(set);
+        }
+    }
+};
+
+struct FontFace {
+    std::string path;
+    FT_Face face = nullptr;
+};
+
 struct FontResources {
     FT_Library library = nullptr;
-    FT_Face face = nullptr;
+    std::vector<FontFace> faces;
 
     FontResources()
     {
@@ -41,23 +57,74 @@ struct FontResources {
         FcDefaultSubstitute(pattern.get());
 
         FcResult result = FcResultNoMatch;
-        std::unique_ptr<FcPattern, FcPatternDeleter> match(FcFontMatch(nullptr, pattern.get(), &result));
-        FcChar8* file = nullptr;
-        if (match == nullptr || FcPatternGetString(match.get(), FC_FILE, 0, &file) != FcResultMatch) {
+        std::unique_ptr<FcFontSet, FcFontSetDeleter> sorted(FcFontSort(nullptr, pattern.get(), FcTrue, nullptr, &result));
+        if (sorted == nullptr) {
             return;
         }
 
-        FT_New_Face(library, reinterpret_cast<const char*>(file), 0, &face);
+        std::unordered_set<std::string> seenPaths;
+        for (int i = 0; i < sorted->nfont; ++i) {
+            FcChar8* file = nullptr;
+            if (FcPatternGetString(sorted->fonts[i], FC_FILE, 0, &file) != FcResultMatch) {
+                continue;
+            }
+
+            std::string path = reinterpret_cast<const char*>(file);
+            if (seenPaths.insert(path).second) {
+                faces.push_back({.path = std::move(path)});
+            }
+        }
     }
 
     ~FontResources()
     {
-        if (face != nullptr) {
-            FT_Done_Face(face);
+        for (FontFace& fontFace : faces) {
+            if (fontFace.face != nullptr) {
+                FT_Done_Face(fontFace.face);
+            }
         }
         if (library != nullptr) {
             FT_Done_FreeType(library);
         }
+    }
+
+    [[nodiscard]] bool loadFace(size_t index)
+    {
+        if (index >= faces.size()) {
+            return false;
+        }
+        if (faces[index].face != nullptr) {
+            return true;
+        }
+
+        return FT_New_Face(library, faces[index].path.c_str(), 0, &faces[index].face) == 0;
+    }
+
+    [[nodiscard]] std::pair<FT_Face, uint32_t> faceForCodepoint(uint32_t codepoint)
+    {
+        static std::unordered_map<uint32_t, uint32_t> faceIndexByCodepoint;
+        if (const auto cached = faceIndexByCodepoint.find(codepoint); cached != faceIndexByCodepoint.end()) {
+            const uint32_t faceIndex = cached->second;
+            if (loadFace(faceIndex)) {
+                return {faces[faceIndex].face, faceIndex};
+            }
+        }
+
+        for (size_t i = 0; i < faces.size(); ++i) {
+            if (!loadFace(i)) {
+                continue;
+            }
+            if (FT_Get_Char_Index(faces[i].face, codepoint) != 0) {
+                faceIndexByCodepoint.emplace(codepoint, static_cast<uint32_t>(i));
+                return {faces[i].face, static_cast<uint32_t>(i)};
+            }
+        }
+
+        if (!faces.empty() && loadFace(0)) {
+            faceIndexByCodepoint.emplace(codepoint, 0);
+            return {faces[0].face, 0};
+        }
+        return {nullptr, 0};
     }
 };
 
@@ -93,24 +160,79 @@ struct CachedGlyph {
     std::vector<uint8_t> alpha;
 };
 
-[[nodiscard]] uint64_t glyphCacheKey(uint32_t pixelSize, unsigned char character)
+struct Utf8Codepoint {
+    uint32_t value = 0;
+    size_t start = 0;
+    size_t end = 0;
+};
+
+[[nodiscard]] bool isContinuationByte(unsigned char value)
 {
-    return (static_cast<uint64_t>(pixelSize) << 8u) | static_cast<uint64_t>(character);
+    return (value & 0xc0u) == 0x80u;
 }
 
-[[nodiscard]] const CachedGlyph* cachedGlyph(FT_Face face, float size, unsigned char character, int loadFlags)
+[[nodiscard]] Utf8Codepoint nextCodepoint(std::string_view value, size_t index)
+{
+    const unsigned char first = static_cast<unsigned char>(value[index]);
+    if (first < 0x80u) {
+        return {.value = first, .start = index, .end = index + 1};
+    }
+
+    uint32_t codepoint = 0xfffdu;
+    size_t length = 1;
+    if ((first & 0xe0u) == 0xc0u) {
+        codepoint = first & 0x1fu;
+        length = 2;
+    } else if ((first & 0xf0u) == 0xe0u) {
+        codepoint = first & 0x0fu;
+        length = 3;
+    } else if ((first & 0xf8u) == 0xf0u) {
+        codepoint = first & 0x07u;
+        length = 4;
+    }
+
+    if (index + length > value.size()) {
+        return {.value = 0xfffdu, .start = index, .end = index + 1};
+    }
+
+    for (size_t i = 1; i < length; ++i) {
+        const unsigned char next = static_cast<unsigned char>(value[index + i]);
+        if (!isContinuationByte(next)) {
+            return {.value = 0xfffdu, .start = index, .end = index + 1};
+        }
+        codepoint = (codepoint << 6u) | (next & 0x3fu);
+    }
+
+    const bool overlong = (length == 2 && codepoint < 0x80u) || (length == 3 && codepoint < 0x800u) ||
+                          (length == 4 && codepoint < 0x10000u);
+    const bool surrogate = codepoint >= 0xd800u && codepoint <= 0xdfffu;
+    if (overlong || surrogate || codepoint > 0x10ffffu) {
+        return {.value = 0xfffdu, .start = index, .end = index + 1};
+    }
+
+    return {.value = codepoint, .start = index, .end = index + length};
+}
+
+[[nodiscard]] uint64_t glyphCacheKey(uint32_t pixelSize, uint32_t faceIndex, uint32_t codepoint)
+{
+    return (static_cast<uint64_t>(pixelSize & 0xffffu) << 37u) |
+           (static_cast<uint64_t>(faceIndex & 0xffffu) << 21u) |
+           static_cast<uint64_t>(codepoint & 0x1fffffu);
+}
+
+[[nodiscard]] const CachedGlyph* cachedGlyph(FT_Face face, uint32_t faceIndex, float size, uint32_t codepoint, int loadFlags)
 {
     static std::unordered_map<uint64_t, CachedGlyph> renderedGlyphs;
     static std::unordered_map<uint64_t, CachedGlyph> metricGlyphs;
 
     const uint32_t pixelSize = fontPixelSize(size);
     auto& cache = loadFlags == FT_LOAD_RENDER ? renderedGlyphs : metricGlyphs;
-    const uint64_t key = glyphCacheKey(pixelSize, character);
+    const uint64_t key = glyphCacheKey(pixelSize, faceIndex, codepoint);
     if (const auto cached = cache.find(key); cached != cache.end()) {
         return &cached->second;
     }
 
-    if (FT_Load_Char(face, character, loadFlags) != 0) {
+    if (!setFontSize(face, size) || FT_Load_Char(face, codepoint, loadFlags) != 0) {
         return nullptr;
     }
 
@@ -142,7 +264,7 @@ struct CachedGlyph {
     static std::unordered_map<uint32_t, std::pair<float, float>> inkBoundsBySize;
 
     auto& font = fontResources();
-    if (font.face == nullptr || !setFontSize(font.face, style.size)) {
+    if (font.faces.empty()) {
         const float fallbackTop = bounds.y + (bounds.height - style.size) * 0.5f;
         return {
             .baseline = fallbackTop + style.size,
@@ -159,7 +281,11 @@ struct CachedGlyph {
         bool hasInk = false;
         constexpr std::string_view representativeGlyphs = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
         for (const unsigned char character : representativeGlyphs) {
-            const CachedGlyph* glyph = cachedGlyph(font.face, style.size, character, FT_LOAD_RENDER);
+            auto [face, faceIndex] = font.faceForCodepoint(character);
+            if (face == nullptr) {
+                continue;
+            }
+            const CachedGlyph* glyph = cachedGlyph(face, faceIndex, style.size, character, FT_LOAD_RENDER);
             if (glyph == nullptr || glyph->rows == 0) {
                 continue;
             }
@@ -198,14 +324,24 @@ struct CachedGlyph {
 float textWidth(std::string_view value, TextStyle style, size_t endIndex)
 {
     auto& font = fontResources();
-    if (font.face == nullptr || !setFontSize(font.face, style.size)) {
+    if (font.faces.empty()) {
         return 0.0f;
     }
 
     float width = 0.0f;
     const size_t clippedEnd = std::min(endIndex, value.size());
-    for (size_t i = 0; i < clippedEnd; ++i) {
-        const CachedGlyph* glyph = cachedGlyph(font.face, style.size, static_cast<unsigned char>(value[i]), FT_LOAD_DEFAULT);
+    for (size_t i = 0; i < clippedEnd;) {
+        const Utf8Codepoint codepoint = nextCodepoint(value, i);
+        if (codepoint.end > clippedEnd) {
+            break;
+        }
+        i = codepoint.end;
+
+        auto [face, faceIndex] = font.faceForCodepoint(codepoint.value);
+        if (face == nullptr) {
+            continue;
+        }
+        const CachedGlyph* glyph = cachedGlyph(face, faceIndex, style.size, codepoint.value, FT_LOAD_DEFAULT);
         if (glyph != nullptr) {
             width += glyph->advance;
         }
@@ -220,21 +356,24 @@ size_t textIndexAtOffset(std::string_view value, float offset, TextStyle style)
     }
 
     auto& font = fontResources();
-    if (font.face == nullptr || !setFontSize(font.face, style.size)) {
+    if (font.faces.empty()) {
         return 0;
     }
 
     float x = 0.0f;
-    for (size_t i = 0; i < value.size(); ++i) {
+    for (size_t i = 0; i < value.size();) {
+        const Utf8Codepoint codepoint = nextCodepoint(value, i);
         float advance = 0.0f;
-        const CachedGlyph* glyph = cachedGlyph(font.face, style.size, static_cast<unsigned char>(value[i]), FT_LOAD_DEFAULT);
+        auto [face, faceIndex] = font.faceForCodepoint(codepoint.value);
+        const CachedGlyph* glyph = face == nullptr ? nullptr : cachedGlyph(face, faceIndex, style.size, codepoint.value, FT_LOAD_DEFAULT);
         if (glyph != nullptr) {
             advance = glyph->advance;
         }
         if (offset < x + advance * 0.5f) {
-            return i;
+            return codepoint.start;
         }
         x += advance;
+        i = codepoint.end;
     }
     return value.size();
 }
@@ -331,7 +470,7 @@ void Canvas::clippedText(Rect bounds, float startX, std::string_view value, Text
     }
 
     auto& font = fontResources();
-    if (font.face == nullptr || !setFontSize(font.face, style.size)) {
+    if (font.faces.empty()) {
         return;
     }
 
@@ -340,8 +479,12 @@ void Canvas::clippedText(Rect bounds, float startX, std::string_view value, Text
     const float minX = bounds.x;
     const float maxX = bounds.x + bounds.width;
 
-    for (const unsigned char character : value) {
-        const CachedGlyph* glyph = cachedGlyph(font.face, style.size, character, FT_LOAD_RENDER);
+    for (size_t i = 0; i < value.size();) {
+        const Utf8Codepoint codepoint = nextCodepoint(value, i);
+        i = codepoint.end;
+
+        auto [face, faceIndex] = font.faceForCodepoint(codepoint.value);
+        const CachedGlyph* glyph = face == nullptr ? nullptr : cachedGlyph(face, faceIndex, style.size, codepoint.value, FT_LOAD_RENDER);
         if (glyph == nullptr) {
             continue;
         }

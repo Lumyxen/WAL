@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <numbers>
+#include <optional>
 #include <poll.h>
 #include <set>
 #include <span>
@@ -272,6 +273,108 @@ bool animationActive(std::chrono::steady_clock::time_point start, std::chrono::m
 {
     return config().animation.enabled && duration > std::chrono::milliseconds{0} &&
            std::chrono::steady_clock::now() - start < duration + animationFrameTimeout;
+}
+
+bool isUtf8ContinuationByte(unsigned char value)
+{
+    return (value & 0xc0u) == 0x80u;
+}
+
+std::optional<size_t> utf8SequenceEnd(std::string_view value, size_t index)
+{
+    const unsigned char first = static_cast<unsigned char>(value[index]);
+    if (first < 0x80u) {
+        return index + 1;
+    }
+
+    uint32_t codepoint = 0;
+    size_t length = 0;
+    if ((first & 0xe0u) == 0xc0u) {
+        codepoint = first & 0x1fu;
+        length = 2;
+    } else if ((first & 0xf0u) == 0xe0u) {
+        codepoint = first & 0x0fu;
+        length = 3;
+    } else if ((first & 0xf8u) == 0xf0u) {
+        codepoint = first & 0x07u;
+        length = 4;
+    } else {
+        return std::nullopt;
+    }
+
+    if (index + length > value.size()) {
+        return std::nullopt;
+    }
+
+    for (size_t i = 1; i < length; ++i) {
+        const unsigned char next = static_cast<unsigned char>(value[index + i]);
+        if (!isUtf8ContinuationByte(next)) {
+            return std::nullopt;
+        }
+        codepoint = (codepoint << 6u) | (next & 0x3fu);
+    }
+
+    const bool overlong = (length == 2 && codepoint < 0x80u) || (length == 3 && codepoint < 0x800u) ||
+                          (length == 4 && codepoint < 0x10000u);
+    const bool surrogate = codepoint >= 0xd800u && codepoint <= 0xdfffu;
+    if (overlong || surrogate || codepoint > 0x10ffffu || codepoint < 0x20u || codepoint == 0x7fu) {
+        return std::nullopt;
+    }
+
+    return index + length;
+}
+
+std::string sanitizedUtf8Text(std::string_view value)
+{
+    std::string sanitized;
+    sanitized.reserve(value.size());
+    for (size_t i = 0; i < value.size();) {
+        const std::optional<size_t> end = utf8SequenceEnd(value, i);
+        if (!end.has_value()) {
+            ++i;
+            continue;
+        }
+
+        sanitized.append(value.substr(i, *end - i));
+        i = *end;
+    }
+    return sanitized;
+}
+
+size_t previousUtf8Index(std::string_view value, size_t index)
+{
+    index = std::min(index, value.size());
+    if (index == 0) {
+        return 0;
+    }
+
+    --index;
+    while (index > 0 && isUtf8ContinuationByte(static_cast<unsigned char>(value[index]))) {
+        --index;
+    }
+    return index;
+}
+
+size_t nextUtf8Index(std::string_view value, size_t index)
+{
+    index = std::min(index, value.size());
+    if (index >= value.size()) {
+        return value.size();
+    }
+
+    if (const std::optional<size_t> end = utf8SequenceEnd(value, index); end.has_value()) {
+        return *end;
+    }
+    return index + 1;
+}
+
+size_t clampUtf8Index(std::string_view value, size_t index)
+{
+    index = std::min(index, value.size());
+    while (index > 0 && index < value.size() && isUtf8ContinuationByte(static_cast<unsigned char>(value[index]))) {
+        --index;
+    }
+    return index;
 }
 
 std::string searchAcronym(std::string_view value)
@@ -2721,13 +2824,7 @@ void App::insertText(std::string_view value)
 {
     deleteSelection();
 
-    std::string sanitized;
-    sanitized.reserve(value.size());
-    for (const char character : value) {
-        if (character >= 0x20 && character <= 0x7e) {
-            sanitized.push_back(character);
-        }
-    }
+    std::string sanitized = sanitizedUtf8Text(value);
     if (sanitized.empty()) {
         refreshUi();
         return;
@@ -2745,8 +2842,9 @@ void App::deleteBackward()
     if (hasTextSelection()) {
         deleteSelection();
     } else if (textCursorIndex > 0) {
-        textFieldValue.erase(textCursorIndex - 1, 1);
-        --textCursorIndex;
+        const size_t previousIndex = previousUtf8Index(textFieldValue, textCursorIndex);
+        textFieldValue.erase(previousIndex, textCursorIndex - previousIndex);
+        textCursorIndex = previousIndex;
         textSelectionAnchor = textCursorIndex;
         resetDesktopNavigation();
     }
@@ -2758,7 +2856,8 @@ void App::deleteForward()
     if (hasTextSelection()) {
         deleteSelection();
     } else if (textCursorIndex < textFieldValue.size()) {
-        textFieldValue.erase(textCursorIndex, 1);
+        const size_t nextIndex = nextUtf8Index(textFieldValue, textCursorIndex);
+        textFieldValue.erase(textCursorIndex, nextIndex - textCursorIndex);
         textSelectionAnchor = textCursorIndex;
         resetDesktopNavigation();
     }
@@ -2886,10 +2985,10 @@ bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
         }
         return false;
     case XKB_KEY_Left:
-        moveCursor(textCursorIndex == 0 ? 0 : textCursorIndex - 1, shift);
+        moveCursor(previousUtf8Index(textFieldValue, textCursorIndex), shift);
         return true;
     case XKB_KEY_Right:
-        moveCursor(std::min(textCursorIndex + 1, textFieldValue.size()), shift);
+        moveCursor(nextUtf8Index(textFieldValue, textCursorIndex), shift);
         return true;
     case XKB_KEY_Home:
         moveCursor(0, shift);
@@ -2911,9 +3010,9 @@ bool App::handleKey(uint32_t key, bool allowSingleShotShortcuts)
         return false;
     }
 
-    std::array<char, 8> text{};
+    std::array<char, 32> text{};
     const int length = xkb_state_key_get_utf8(xkbState, keycode, text.data(), text.size());
-    if (length == 1 && text[0] >= 0x20 && text[0] <= 0x7e) {
+    if (length > 0 && static_cast<size_t>(length) < text.size()) {
         insertText(std::string_view{text.data(), static_cast<size_t>(length)});
         return true;
     }
@@ -2990,7 +3089,7 @@ void App::moveCursor(size_t nextIndex, bool extendSelection)
     const size_t previousCursor = textCursorIndex;
     const size_t previousAnchor = textSelectionAnchor;
 
-    textCursorIndex = std::min(nextIndex, textFieldValue.size());
+    textCursorIndex = clampUtf8Index(textFieldValue, nextIndex);
     if (!extendSelection) {
         textSelectionAnchor = textCursorIndex;
     }
@@ -3003,20 +3102,26 @@ void App::moveCursorByWord(bool forward, bool extendSelection)
 {
     size_t index = textCursorIndex;
     if (forward) {
-        while (index < textFieldValue.size() &&
-               std::isalnum(static_cast<unsigned char>(textFieldValue[index])) == 0) {
-            ++index;
+        while (index < textFieldValue.size() && std::isalnum(static_cast<unsigned char>(textFieldValue[index])) == 0) {
+            index = nextUtf8Index(textFieldValue, index);
         }
-        while (index < textFieldValue.size() &&
-               std::isalnum(static_cast<unsigned char>(textFieldValue[index])) != 0) {
-            ++index;
+        while (index < textFieldValue.size() && std::isalnum(static_cast<unsigned char>(textFieldValue[index])) != 0) {
+            index = nextUtf8Index(textFieldValue, index);
         }
     } else {
-        while (index > 0 && std::isalnum(static_cast<unsigned char>(textFieldValue[index - 1])) == 0) {
-            --index;
+        while (index > 0) {
+            const size_t previousIndex = previousUtf8Index(textFieldValue, index);
+            if (std::isalnum(static_cast<unsigned char>(textFieldValue[previousIndex])) != 0) {
+                break;
+            }
+            index = previousIndex;
         }
-        while (index > 0 && std::isalnum(static_cast<unsigned char>(textFieldValue[index - 1])) != 0) {
-            --index;
+        while (index > 0) {
+            const size_t previousIndex = previousUtf8Index(textFieldValue, index);
+            if (std::isalnum(static_cast<unsigned char>(textFieldValue[previousIndex])) == 0) {
+                break;
+            }
+            index = previousIndex;
         }
     }
     moveCursor(index, extendSelection);
