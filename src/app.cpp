@@ -339,24 +339,25 @@ std::vector<std::filesystem::path> xdgDataDirs()
     return dirs;
 }
 
-std::optional<std::filesystem::path> resolveIconPath(std::string_view iconName)
+std::vector<std::filesystem::path> resolveIconPaths(std::string_view iconName)
 {
     if (iconName.empty()) {
-        return std::nullopt;
+        return {};
     }
 
     const std::filesystem::path iconPath(iconName);
     std::error_code error;
     if (iconPath.is_absolute() && std::filesystem::is_regular_file(iconPath, error)) {
-        return iconPath;
+        return {iconPath};
     }
 
     std::vector<std::string> filenames;
-    if (iconPath.extension().empty()) {
+    if (iconPath.parent_path().empty()) {
         filenames = {
             std::string(iconName) + ".png",
             std::string(iconName) + ".svg",
             std::string(iconName) + ".xpm",
+            std::string(iconName),
         };
     } else {
         filenames = {std::string(iconName)};
@@ -368,6 +369,13 @@ std::optional<std::filesystem::path> resolveIconPath(std::string_view iconName)
         searchRoots.emplace_back(dataDir / "pixmaps");
     }
 
+    std::vector<std::filesystem::path> paths;
+    const auto addPath = [&](const std::filesystem::path& path) {
+        if (std::ranges::find(paths, path) == paths.end()) {
+            paths.push_back(path);
+        }
+    };
+
     for (const auto& root : searchRoots) {
         if (!std::filesystem::is_directory(root, error)) {
             continue;
@@ -376,7 +384,7 @@ std::optional<std::filesystem::path> resolveIconPath(std::string_view iconName)
         for (const auto& filename : filenames) {
             const std::filesystem::path direct = root / filename;
             if (std::filesystem::is_regular_file(direct, error)) {
-                return direct;
+                addPath(direct);
             }
         }
 
@@ -393,13 +401,13 @@ std::optional<std::filesystem::path> resolveIconPath(std::string_view iconName)
             }
             for (const auto& filename : filenames) {
                 if (it->path().filename() == filename) {
-                    return it->path();
+                    addPath(it->path());
                 }
             }
         }
     }
 
-    return std::nullopt;
+    return paths;
 }
 
 std::filesystem::path stateDirectory()
@@ -450,6 +458,113 @@ ui::Bitmap pixbufToBitmap(GdkPixbuf* pixbuf)
         }
     }
 
+    return bitmap;
+}
+
+ui::Bitmap cairoSurfaceToBitmap(cairo_surface_t* surface)
+{
+    if (surface == nullptr || cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        return {};
+    }
+
+    cairo_surface_flush(surface);
+    const int width = cairo_image_surface_get_width(surface);
+    const int height = cairo_image_surface_get_height(surface);
+    const int stride = cairo_image_surface_get_stride(surface);
+    const unsigned char* data = cairo_image_surface_get_data(surface);
+    if (width <= 0 || height <= 0 || data == nullptr) {
+        return {};
+    }
+
+    ui::Bitmap bitmap{
+        .width = static_cast<uint32_t>(width),
+        .height = static_cast<uint32_t>(height),
+    };
+    bitmap.pixels.reserve(static_cast<size_t>(bitmap.width) * bitmap.height);
+
+    for (uint32_t y = 0; y < bitmap.height; ++y) {
+        const unsigned char* row = data + static_cast<size_t>(y) * static_cast<size_t>(stride);
+        for (uint32_t x = 0; x < bitmap.width; ++x) {
+            const unsigned char* pixel = row + static_cast<size_t>(x) * 4;
+            const float alpha = static_cast<float>(pixel[3]) / 255.0f;
+            const float red = alpha > 0.0f ? static_cast<float>(pixel[2]) / 255.0f / alpha : 0.0f;
+            const float green = alpha > 0.0f ? static_cast<float>(pixel[1]) / 255.0f / alpha : 0.0f;
+            const float blue = alpha > 0.0f ? static_cast<float>(pixel[0]) / 255.0f / alpha : 0.0f;
+            bitmap.pixels.push_back(ui::Color::srgb(
+                static_cast<uint8_t>(std::clamp(red, 0.0f, 1.0f) * 255.0f),
+                static_cast<uint8_t>(std::clamp(green, 0.0f, 1.0f) * 255.0f),
+                static_cast<uint8_t>(std::clamp(blue, 0.0f, 1.0f) * 255.0f),
+                alpha
+            ));
+        }
+    }
+
+    return bitmap;
+}
+
+ui::Bitmap loadSvgBitmap(const std::filesystem::path& path)
+{
+    GError* error = nullptr;
+    RsvgHandle* handle = rsvg_handle_new_from_file(path.c_str(), &error);
+    if (handle == nullptr) {
+        if (error != nullptr) {
+            g_error_free(error);
+        }
+        return {};
+    }
+
+    cairo_surface_t* surface = cairo_image_surface_create(
+        CAIRO_FORMAT_ARGB32,
+        static_cast<int>(desktopIconSize),
+        static_cast<int>(desktopIconSize)
+    );
+    cairo_t* cairo = cairo_create(surface);
+    cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cairo);
+    cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
+
+    const RsvgRectangle viewport{
+        .x = 0.0,
+        .y = 0.0,
+        .width = static_cast<double>(desktopIconSize),
+        .height = static_cast<double>(desktopIconSize),
+    };
+    const gboolean rendered = rsvg_handle_render_document(handle, cairo, &viewport, &error);
+    cairo_destroy(cairo);
+    g_object_unref(handle);
+
+    if (rendered == FALSE) {
+        if (error != nullptr) {
+            g_error_free(error);
+        }
+        cairo_surface_destroy(surface);
+        return {};
+    }
+
+    ui::Bitmap bitmap = cairoSurfaceToBitmap(surface);
+    cairo_surface_destroy(surface);
+    return bitmap;
+}
+
+ui::Bitmap loadPixbufBitmap(const std::filesystem::path& path)
+{
+    GError* error = nullptr;
+    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
+        path.c_str(),
+        static_cast<int>(desktopIconSize),
+        static_cast<int>(desktopIconSize),
+        TRUE,
+        &error
+    );
+    if (pixbuf == nullptr) {
+        if (error != nullptr) {
+            g_error_free(error);
+        }
+        return {};
+    }
+
+    ui::Bitmap bitmap = pixbufToBitmap(pixbuf);
+    g_object_unref(pixbuf);
     return bitmap;
 }
 
@@ -595,29 +710,28 @@ const ui::Bitmap& pinIconBitmap()
 
 ui::Bitmap loadIconBitmap(std::string_view iconName)
 {
-    const auto iconPath = resolveIconPath(iconName);
-    if (!iconPath.has_value()) {
-        return {};
+    std::vector<std::string_view> iconNames = {iconName};
+    if (iconName.starts_with("application-x-")) {
+        iconNames.push_back("application-x-executable");
+        iconNames.push_back("package-x-generic");
     }
 
-    GError* error = nullptr;
-    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file_at_scale(
-        iconPath->c_str(),
-        static_cast<int>(desktopIconSize),
-        static_cast<int>(desktopIconSize),
-        TRUE,
-        &error
-    );
-    if (pixbuf == nullptr) {
-        if (error != nullptr) {
-            g_error_free(error);
+    for (const auto name : iconNames) {
+        for (const auto& iconPath : resolveIconPaths(name)) {
+            const std::string extension = lowercase(iconPath.extension().string());
+            ui::Bitmap bitmap = extension == ".svg" ? loadSvgBitmap(iconPath) : loadPixbufBitmap(iconPath);
+            if (bitmap.pixels.empty() && extension == ".svg") {
+                bitmap = loadPixbufBitmap(iconPath);
+            } else if (bitmap.pixels.empty()) {
+                bitmap = loadSvgBitmap(iconPath);
+            }
+            if (!bitmap.pixels.empty()) {
+                return bitmap;
+            }
         }
-        return {};
     }
 
-    ui::Bitmap bitmap = pixbufToBitmap(pixbuf);
-    g_object_unref(pixbuf);
-    return bitmap;
+    return {};
 }
 
 std::string desktopExecCommand(std::string_view exec)
