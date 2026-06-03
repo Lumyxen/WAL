@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <numbers>
 #include <poll.h>
 #include <set>
 #include <sstream>
@@ -502,6 +503,54 @@ ui::Bitmap cairoSurfaceToBitmap(cairo_surface_t* surface)
     return bitmap;
 }
 
+void appendRoundedRectangle(cairo_t* cairo, double x, double y, double width, double height, double radius)
+{
+    cairo_new_sub_path(cairo);
+    cairo_arc(cairo, x + width - radius, y + radius, radius, -std::numbers::pi / 2.0, 0.0);
+    cairo_arc(cairo, x + width - radius, y + height - radius, radius, 0.0, std::numbers::pi / 2.0);
+    cairo_arc(cairo, x + radius, y + height - radius, radius, std::numbers::pi / 2.0, std::numbers::pi);
+    cairo_arc(cairo, x + radius, y + radius, radius, std::numbers::pi, std::numbers::pi * 1.5);
+    cairo_close_path(cairo);
+}
+
+ui::Bitmap drawDefaultDesktopIconBitmap()
+{
+    cairo_surface_t* surface = cairo_image_surface_create(
+        CAIRO_FORMAT_ARGB32,
+        static_cast<int>(desktopIconSize),
+        static_cast<int>(desktopIconSize)
+    );
+    cairo_t* cairo = cairo_create(surface);
+    cairo_set_operator(cairo, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cairo);
+    cairo_set_operator(cairo, CAIRO_OPERATOR_OVER);
+
+    constexpr double sourceSize = 24.0;
+    const double scale = static_cast<double>(desktopIconSize) / sourceSize;
+    cairo_scale(cairo, scale, scale);
+    cairo_set_source_rgba(cairo, 0xd3 / 255.0, 0xc6 / 255.0, 0xaa / 255.0, 1.0);
+    cairo_set_line_width(cairo, 2.0);
+    cairo_set_line_cap(cairo, CAIRO_LINE_CAP_ROUND);
+    cairo_set_line_join(cairo, CAIRO_LINE_JOIN_ROUND);
+
+    appendRoundedRectangle(cairo, 3.0, 3.0, 18.0, 18.0, 2.0);
+    cairo_stroke(cairo);
+
+    cairo_arc(cairo, 9.0, 9.0, 2.0, 0.0, std::numbers::pi * 2.0);
+    cairo_stroke(cairo);
+
+    cairo_move_to(cairo, 21.0, 15.0);
+    cairo_line_to(cairo, 17.914, 11.914);
+    cairo_curve_to(cairo, 17.133, 11.133, 15.867, 11.133, 15.086, 11.914);
+    cairo_line_to(cairo, 6.0, 21.0);
+    cairo_stroke(cairo);
+
+    cairo_destroy(cairo);
+    ui::Bitmap bitmap = cairoSurfaceToBitmap(surface);
+    cairo_surface_destroy(surface);
+    return bitmap;
+}
+
 ui::Bitmap loadSvgBitmap(const std::filesystem::path& path)
 {
     GError* error = nullptr;
@@ -708,6 +757,14 @@ const ui::Bitmap& pinIconBitmap()
     return bitmap;
 }
 
+const ui::Bitmap& defaultDesktopIconBitmap()
+{
+    static const ui::Bitmap bitmap = [] {
+        return drawDefaultDesktopIconBitmap();
+    }();
+    return bitmap;
+}
+
 ui::Bitmap loadIconBitmap(std::string_view iconName)
 {
     std::vector<std::string_view> iconNames = {iconName};
@@ -731,7 +788,7 @@ ui::Bitmap loadIconBitmap(std::string_view iconName)
         }
     }
 
-    return {};
+    return defaultDesktopIconBitmap();
 }
 
 std::string desktopExecCommand(std::string_view exec)
