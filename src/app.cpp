@@ -42,9 +42,9 @@ constexpr std::array<float, 4> backgroundTint = {
     0.72f,
 };
 
-const ui::Color panelFill = ui::Color::srgb(0x2e, 0x38, 0x3c);
-const ui::Color panelBorder = ui::Color::srgb(0x7a, 0x84, 0x78);
-const ui::Color textFieldFill = ui::Color::srgb(0x28, 0x30, 0x34);
+const ui::Color panelFill = ui::Color::srgb(0x27, 0x2e, 0x33);
+const ui::Color panelBorder = ui::Color::srgb(0x4f, 0x5b, 0x58);
+const ui::Color textFieldFill = ui::Color::srgb(0x2e, 0x38, 0x3c);
 const ui::Color transparent = ui::Color::srgb(0x27, 0x2e, 0x33, 0.0f);
 constexpr std::string_view textFieldPlaceholder = "Search";
 const ui::TextStyle textFieldPlaceholderStyle{.color = ui::Color::srgb(0x86, 0x8d, 0x80), .size = 16.0f};
@@ -57,6 +57,7 @@ constexpr float listTopGap = 12.0f;
 constexpr float desktopIconSize = 30.0f;
 constexpr float desktopIconTextGap = 12.0f;
 const ui::TextStyle desktopEntryText{.color = ui::Color::srgb(0xd3, 0xc6, 0xaa), .size = 15.0f};
+const ui::Color desktopEntryMatchHighlight = ui::Color::srgb(0x3c, 0x48, 0x41);
 
 std::string trim(std::string_view value)
 {
@@ -89,12 +90,45 @@ bool parseBool(std::string_view value)
     return normalized == "true" || normalized == "1";
 }
 
+void drawHighlightedText(
+    ui::Canvas& canvas,
+    ui::Rect bounds,
+    std::string_view value,
+    std::string_view lowercaseValue,
+    std::string_view lowercaseQuery,
+    ui::TextStyle style
+)
+{
+    if (!lowercaseQuery.empty()) {
+        const float highlightHeight = std::min(bounds.height - 8.0f, style.size + 6.0f);
+        const float highlightY = bounds.y + (bounds.height - highlightHeight) * 0.5f;
+        size_t matchStart = lowercaseValue.find(lowercaseQuery);
+        while (matchStart != std::string_view::npos) {
+            const size_t matchEnd = matchStart + lowercaseQuery.size();
+            const float highlightX = bounds.x + ui::textWidth(value, style, matchStart);
+            const float highlightRight = bounds.x + ui::textWidth(value, style, matchEnd);
+            const float clippedHighlightX = std::max(highlightX, bounds.x);
+            const float clippedHighlightRight = std::min(highlightRight, bounds.x + bounds.width);
+            if (clippedHighlightRight > clippedHighlightX) {
+                canvas.box(
+                    {clippedHighlightX, highlightY, clippedHighlightRight - clippedHighlightX, highlightHeight},
+                    {.fill = desktopEntryMatchHighlight, .borderWidth = 0.0f}
+                );
+            }
+
+            matchStart = lowercaseValue.find(lowercaseQuery, matchEnd);
+        }
+    }
+
+    canvas.text(bounds, value, style);
+}
+
 ui::ListStyle desktopListStyle()
 {
     return {
         .container = {.fill = transparent, .borderWidth = 0.0f},
         .item = {.fill = transparent, .borderWidth = 0.0f},
-        .selectedFill = ui::Color::srgb(0x37, 0x41, 0x45, 0.95f),
+        .selectedFill = ui::Color::srgb(0x41, 0x4b, 0x50, 0.95f),
         .padding = 0.0f,
         .itemHeight = 42.0f,
         .itemGap = 3.0f,
@@ -2146,6 +2180,7 @@ void App::rebuildUi()
     clampDesktopNavigation();
 
     ui::Canvas canvas(static_cast<float>(swapchainExtent.width), static_cast<float>(swapchainExtent.height));
+    const std::string query = lowercase(textFieldValue);
 
     const std::vector<DesktopEntry*> visibleEntries = visibleDesktopEntries();
     const ui::Rect panel = panelRect(visibleEntries.size());
@@ -2195,7 +2230,8 @@ void App::rebuildUi()
             }
 
             const float textX = iconRect.x + iconRect.width + desktopIconTextGap;
-            canvas.text(
+            drawHighlightedText(
+                canvas,
                 {
                     textX,
                     itemRect.y,
@@ -2203,6 +2239,8 @@ void App::rebuildUi()
                     itemRect.height,
                 },
                 entry.name,
+                lowercase(entry.name),
+                query,
                 desktopEntryText
             );
 
