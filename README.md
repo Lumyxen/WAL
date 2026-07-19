@@ -1,6 +1,9 @@
-# wal
+# WAL
 
 `wal` is a small Wayland application launcher. It opens as a layer-shell overlay, searches installed `.desktop` applications, renders with Vulkan, and keeps pinned and frequently launched apps near the top.
+
+## Moved locations
+New location is in Codeberg [here](https://codeberg.org/Faevon/WAL).
 
 ## Features
 
